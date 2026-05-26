@@ -1,0 +1,219 @@
+  训练一步完整 Tensor 形状追踪
+
+  以 ViT-Giant pretrain，16帧，256px 为基准（configs/train_2_1/vitg16/pretrain-256px-16f.yaml）：
+
+  B=24, T=16, H=W=256, patch=16, tubelet=2
+  embed_dim(encoder)=1408, predictor_embed_dim=384
+  depth(enc)=40, depth(pred)=24, num_heads(enc)=22, num_heads(pred)=12
+  N_total = (16/2)×(256/16)×(256/16) = 8×16×16 = 2048 tokens
+
+  ---
+  阶段 0：数据加载
+
+  # MaskCollator 输出，2种掩码配置：
+  #   mask cfg 0: 8 small blocks, spatial_scale=0.15
+  #   mask cfg 1: 2 large blocks, spatial_scale=0.70
+
+  clips: list[Tensor], len=1
+    clips[0]:                   [24, 3, 16, 256, 256]
+
+  masks_enc: list[list[Tensor]], outer=1 fpc, inner=2 mask cfgs
+    masks_enc[0][0]:             [24, N_enc]   # context 索引，小掩码
+    masks_enc[0][1]:             [24, N_enc']  # context 索引，大掩码
+
+  masks_pred: list[list[Tensor]]
+    masks_pred[0][0]:            [24, N_pred]  # target 索引 (N_enc + N_pred ≤ 2048)
+    masks_pred[0][1]:            [24, N_pred']
+
+  ---
+  阶段 1：目标编码器（Target Encoder，EMA，无梯度）
+
+  target_encoder = MultiSeqWrapper(ViT-Giant-EMA)
+  调用: target_encoder(clips, training_mode=True)
+
+  1-a. PatchEmbed3D
+  输入:                          [24, 3, 16, 256, 256]
+  Conv3d(3→1408, k=(2,16,16)):  [24, 1408, 8, 16, 16]
+  flatten(2):                   [24, 1408, 2048]
+  transpose(1,2):               [24, 2048, 1408]
+
+  1-b. 加模态嵌入
+  x += video_mod_embed          [1, 1, 1408] → broadcast
+  x:                            [24, 2048, 1408]
+
+  1-c. 不做掩码（目标编码器看全部 token）
+
+  1-d. 40层 Transformer Block（逐层）
+  # 每层内部（RoPEAttention, head_dim=64, num_heads=22）：
+  norm1(x):                     [24, 2048, 1408]
+  qkv Linear(1408→4224):        [24, 2048, 4224]
+    → reshape (3,22,64):        [3, 24, 22, 2048, 64]
+  q/k/v:                   each [24, 22, 2048, 64]
+
+  # RoPE 位置分量（head_dim=64）：
+  #   d_dim=h_dim=w_dim = 2*floor((64//3)/2) = 20, leftover=4
+  pos_indices (d/h/w):          [24, 22, 2048]  ← arange(8×16×16)
+  q_rotated, k_rotated:    each [24, 22, 2048, 64]
+
+  SDPA output:                  [24, 22, 2048, 64]
+  transpose+reshape:            [24, 2048, 1408]
+  proj Linear(1408→1408):       [24, 2048, 1408]
+  残差加 MLP(1408→5632→1408):   [24, 2048, 1408]
+
+  1-e. 分层输出采集（depth=40, out_layers=[9,19,29,39]）
+  block 9  → norms_block[0](x): [24, 2048, 1408]  # hier[0]
+  block 19 → norms_block[1](x): [24, 2048, 1408]  # hier[1]
+  block 29 → norms_block[2](x): [24, 2048, 1408]  # hier[2]
+  block 39 → norms_block[3](x): [24, 2048, 1408]  # hier[3]
+
+  torch.cat(hier, dim=2):       [24, 2048, 5632]  ← 4×1408
+
+  1-f. forward_target 归一化（levels_predictor=4）
+  # 按 embed_dim=1408 切成4块，各自 LayerNorm，再拼回：
+  chunk_i: [24, 2048, 1408] × 4
+  torch.cat(..., dim=2):        [24, 2048, 5632]
+
+  h[0]:                         [24, 2048, 5632]  ← 最终目标特征
+
+  ---
+  阶段 2：上下文编码器（Context Encoder，有梯度）
+
+  encoder = MultiSeqWrapper(ViT-Giant)
+  调用: encoder(clips, masks_enc, training_mode=True)
+
+  对 masks_enc[0] 的两个掩码分别跑一次 forward：
+
+  2-a~b. PatchEmbed3D + 模态嵌入（与目标编码器完全相同）
+  x:                            [24, 2048, 1408]
+
+  2-c. 掩码裁剪（apply_masks）
+  masks_enc[0][0]:              [24, N_enc]
+  gather along dim=1:           [24, N_enc, 1408]
+  → 上下文编码器只处理 N_enc 个 token!
+  masks (合并后):               [24, N_enc]
+
+  2-d. 40层 Transformer Block（仅在 N_enc 个 token 上）
+  # 每层 RoPEAttention 用 N_enc 个位置索引（非完整 arange）
+  每层输入/输出:                [24, N_enc, 1408]
+  pos_indices:                  [24, 22, N_enc]  ← 来自 masks_enc
+
+  # 效率关键：仅 N_enc << 2048 个 token 参与 attention
+
+  2-e. 分层输出（同上，training=True）
+  torch.cat(hier, dim=2):       [24, N_enc, 5632]
+
+  MultiSeqWrapper 对两个掩码各跑一次：
+  z[0][0]:                      [24, N_enc,  5632]  # mask cfg 0
+  z[0][1]:                      [24, N_enc', 5632]  # mask cfg 1
+
+  ---
+  阶段 3：预测器（Predictor）
+
+  predictor = PredictorMultiSeqWrapper(VisionTransformerPredictor)
+  调用: predictor(z, masks_enc, masks_pred, mod="video")
+
+  对 z[0] 的两个结果分别调用 backbone（以 mask cfg 0 为例）：
+
+  输入： x=[24, N_enc, 5632], masks_x=[24, N_enc], masks_y=[24, N_pred]
+
+  3-a. predictor_embed（MLP，因 n_levels=4 > 1）
+  Linear(5632→1408):            [24, N_enc, 1408]
+  SiLU:                         [24, N_enc, 1408]
+  Linear(1408→384):             [24, N_enc, 384]
+                                ↑ 映射到 predictor 空间
+  N_ctxt = N_enc
+
+  3-b. 创建 mask token（目标占位符）
+  mask_tokens[0]:               [1, 1, 384]
+  repeat(24, 2048, 1):          [24, 2048, 384]
+  apply_masks([24, N_pred]):    [24, N_pred, 384]  ← 目标位置的可学习 token
+
+  3-c. 拼接 + 按位置排序
+  x (context):                  [24, N_enc, 384]
+  pred_tokens (target):         [24, N_pred, 384]
+  torch.cat(dim=1):             [24, N_enc+N_pred, 384]
+
+  masks = cat([masks_x, masks_y]): [24, N_enc+N_pred]  ← 位置索引
+  argsort:                      [24, N_enc+N_pred]
+  x (sorted):                   [24, N_enc+N_pred, 384]  ← 按原始位置排好序
+
+  3-d. 加模态嵌入
+  x += video_mod_embed          [1,1,384] broadcast
+  x:                            [24, N_enc+N_pred, 384]
+
+  3-e. 24层 Transformer Block
+  # RoPEAttention，head_dim=32，num_heads=12
+  每层输入/输出:                [24, N_enc+N_pred, 384]
+
+  qkv Linear(384→1152):         [24, N_enc+N_pred, 1152]
+    → [3, 24, 12, N_enc+N_pred, 32]
+  q/k/v:                   each [24, 12, N_enc+N_pred, 32]
+
+  # RoPE：d_dim=h_dim=w_dim=10，leftover=2
+  pos_indices:                  [24, 12, N_enc+N_pred]  ← sorted masks
+  SDPA output:                  [24, 12, N_enc+N_pred, 32]
+  proj:                         [24, N_enc+N_pred, 384]
+
+  3-f. predictor_norm + 反排序 + 输出投影
+  LayerNorm(384):               [24, N_enc+N_pred, 384]
+  reverse_argsort (unsort):     [24, N_enc+N_pred, 384]
+
+  x_pred    = x[:, N_enc:, :]   [24, N_pred, 384]
+  x_context = x[:, :N_enc, :]   [24, N_enc, 384]
+
+  # predictor_proj: Linear(384 → 4×1408=5632)
+  x_pred    = proj(x_pred):     [24, N_pred, 5632]
+  x_context = proj_ctx(x_context): [24, N_enc, 5632]
+
+  两个 mask cfg 的输出：
+  outs_pred[0]    = [[24, N_pred, 5632], [24, N_pred', 5632]]
+  outs_context[0] = [[24, N_enc, 5632],  [24, N_enc', 5632]]
+
+  ---
+  阶段 4：损失计算
+
+  4-a. 从目标特征中提取对应区域
+  h[0]:                         [24, 2048, 5632]  (全视频特征)
+
+  apply_masks(h[0], masks_pred[0][0]):  [24, N_pred, 5632]   ← 目标 target 区
+  apply_masks(h[0], masks_enc[0][0]):   [24, N_enc, 5632]    ← 目标 context 区
+
+  4-b. 预测损失（L1）
+  z_pred[0][0]:                 [24, N_pred, 5632]  ← 预测值
+  h_target:                     [24, N_pred, 5632]  ← 真实值
+
+  L_pred = mean(|z_pred - h_target|) / 1.0
+
+  4-c. Context 损失（predict_all=True）
+  z_context[0][0]:              [24, N_enc, 5632]   ← 预测的 context 表示
+  h_context:                    [24, N_enc, 5632]   ← 真实的 context 表示
+
+  L_context = mean(|z_context - h_context|)
+
+  L_total = L_pred + λ × L_context
+
+  ---
+  关键尺寸总览
+
+  ┌───────────────────────┬───────────┬────────────────────────────┐
+  │         位置          │  Tensor   │            形状            │
+  ├───────────────────────┼───────────┼────────────────────────────┤
+  │ 原始视频              │ clips[0]  │ [24, 3, 16, 256, 256]      │
+  ├───────────────────────┼───────────┼────────────────────────────┤
+  │ PatchEmbed 后         │ x         │ [24, 2048, 1408]           │
+  ├───────────────────────┼───────────┼────────────────────────────┤
+  │ 目标编码器输出        │ h[0]      │ [24, 2048, 5632] ← 4层拼接 │
+  ├───────────────────────┼───────────┼────────────────────────────┤
+  │ 上下文编码器输出      │ z[0][0]   │ [24, N_enc, 5632]          │
+  ├───────────────────────┼───────────┼────────────────────────────┤
+  │ Predictor 内部        │ x         │ [24, N_enc+N_pred, 384]    │
+  ├───────────────────────┼───────────┼────────────────────────────┤
+  │ Predictor 预测输出    │ z_pred    │ [24, N_pred, 5632]         │
+  ├───────────────────────┼───────────┼────────────────────────────┤
+  │ Predictor context输出 │ z_context │ [24, N_enc, 5632]          │
+  ├───────────────────────┼───────────┼────────────────────────────┤
+  │ 损失比较双方          │ 均为      │ [24, N_pred/N_enc, 5632]   │
+  └───────────────────────┴───────────┴────────────────────────────┘
+
+  N_enc + N_pred ≤ 2048，具体数量由掩码采样决定。Context 编码器只处理 N_enc 个
+  token，这是整个架构高效性的关键——预测器则在完整的 N_enc + N_pred 个 token 上运行，但维度 384 远小于 1408。
