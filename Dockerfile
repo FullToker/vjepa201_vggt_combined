@@ -79,15 +79,17 @@ RUN pip install \
         braceexpand \
         webdataset \
         timm \
-        transformers \
+        "transformers<4.47" \
         peft \
         decord \
         beartype \
         fire \
         python-box \
+        scikit-learn \
         scikit-image \
         ftfy \
-        jupyter
+        jupyter \
+        hf
 
 # ── vggt demo deps ────────────────────────────────────────────────────────────
 RUN pip install \

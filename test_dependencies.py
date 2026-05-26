@@ -41,7 +41,7 @@ def check_cmd(*cmd: str, label: str | None = None):
 print("\n=== CLI tools ===")
 check_cmd("git", "--version", label="git")
 check_cmd("git", "lfs", "version", label="git-lfs")
-check_cmd("huggingface-cli", "--help", label="huggingface-cli")
+check_cmd("hf", "--help", label="hf (huggingface)")
 check_cmd("ffmpeg", "-version", label="ffmpeg")
 
 # ── PyTorch + CUDA ────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ check_import("cv2", label="opencv-python")
 check_import("pandas", label="pandas")
 check_import("scipy", label="scipy")
 check_import("matplotlib", label="matplotlib")
-check_import("sklearn", label="scikit-learn (via scikit-image dep)")
+check_import("sklearn", label="scikit-learn")
 check_import("skimage", label="scikit-image")
 check_import("h5py", label="h5py")
 
