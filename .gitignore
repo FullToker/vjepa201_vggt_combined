@@ -70,6 +70,9 @@ dmypy.json
 .python-version
 __pypackages__/
 
+# ── checkpoints ────────────────────────────────────────────────────────────────
+ckpts/
+
 # ── vggt-specific paths ────────────────────────────────────────────────────────
 vggt/.hydra/
 vggt/output/
