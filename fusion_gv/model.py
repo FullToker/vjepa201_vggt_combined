@@ -27,6 +27,36 @@ import torch.nn as nn
 from fusion_gv.config import FusionConfig
 from fusion_gv.encoders import FrozenVGGT, FrozenJEPA
 from fusion_gv.fusion import MultiLevelFusion
+from fusion_gv.fusion_aligned import AlignedMultiLevelFusion
+
+_FUSION_TYPES = ("add", "cross_attn")
+
+
+def _build_fusion(config: FusionConfig) -> nn.Module:
+    if config.fusion_type == "add":
+        return AlignedMultiLevelFusion(
+            num_levels=config.num_levels,
+            vggt_dim=config.vggt_out_dim,
+            jepa_dim=config.jepa_embed_dim,
+            d_fusion=config.d_fusion,
+            ffn_ratio=config.ffn_ratio,
+            dropout=config.dropout,
+            src_grid=int(config.jepa_num_patches ** 0.5),   # 24
+            tgt_grid=int(config.vggt_num_patches ** 0.5),   # 37
+        )
+    if config.fusion_type == "cross_attn":
+        return MultiLevelFusion(
+            num_levels=config.num_levels,
+            vggt_dim=config.vggt_out_dim,
+            jepa_dim=config.jepa_embed_dim,
+            d_fusion=config.d_fusion,
+            num_heads=config.num_heads,
+            ffn_ratio=config.ffn_ratio,
+            dropout=config.dropout,
+        )
+    raise ValueError(
+        f"Unknown fusion_type '{config.fusion_type}'. Choose from {_FUSION_TYPES}."
+    )
 
 
 class FusionGV(nn.Module):
@@ -37,8 +67,9 @@ class FusionGV(nn.Module):
         FrozenVGGT  — geometric features, 4 levels × (B, S, 1369, 2048)
         FrozenJEPA  — semantic features,  4 levels × (B, S,  576, 1024)
 
-    Trainable module:
-        MultiLevelFusion — cross-attention fusion, 4 levels × (B, S, 1369, D_f)
+    Trainable fusion module (selected by config.fusion_type):
+        "add"        → AlignedMultiLevelFusion  (interpolation + add, default)
+        "cross_attn" → MultiLevelFusion         (cross-attention)
 
     Args:
         config : FusionConfig instance (uses defaults if None)
@@ -54,15 +85,7 @@ class FusionGV(nn.Module):
         self.vggt_encoder = FrozenVGGT(config.vggt_ckpt)
         self.jepa_encoder = FrozenJEPA(config.jepa_ckpt)
 
-        self.fusion = MultiLevelFusion(
-            num_levels=config.num_levels,
-            vggt_dim=config.vggt_out_dim,
-            jepa_dim=config.jepa_embed_dim,
-            d_fusion=config.d_fusion,
-            num_heads=config.num_heads,
-            ffn_ratio=config.ffn_ratio,
-            dropout=config.dropout,
-        )
+        self.fusion = _build_fusion(config)
 
     def forward(
         self,

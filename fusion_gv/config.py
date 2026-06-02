@@ -23,9 +23,12 @@ class FusionConfig:
     jepa_out_layers: tuple = (5, 11, 17, 23)   # must be subset of hierarchical_layers
 
     # ── Fusion module ──────────────────────────────────────────────────────────
+    # "add"        → AlignedMultiLevelFusion  (interpolation + element-wise add)
+    # "cross_attn" → MultiLevelFusion         (cross-attention, heavier)
+    fusion_type: str = "add"
     num_levels: int = 4
     d_fusion: int = 512
-    num_heads: int = 8
+    num_heads: int = 8       # only used when fusion_type="cross_attn"
     ffn_ratio: float = 4.0
     dropout: float = 0.0
 
