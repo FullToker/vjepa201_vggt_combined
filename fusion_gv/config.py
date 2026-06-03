@@ -23,14 +23,22 @@ class FusionConfig:
     jepa_out_layers: tuple = (5, 11, 17, 23)   # must be subset of hierarchical_layers
 
     # ── Fusion module ──────────────────────────────────────────────────────────
-    # "add"        → AlignedMultiLevelFusion  (interpolation + element-wise add)
-    # "cross_attn" → MultiLevelFusion         (cross-attention, heavier)
-    fusion_type: str = "add"
+    # "concat"     → AlignedMultiLevelFusion  (bilinear spatial align + concat)
+    #                output dim = vggt_out_dim + jepa_embed_dim = 3072, no learned params
+    # "cross_attn" → MultiLevelFusion         (cross-attention, learnable, heavier)
+    #                output dim = d_fusion
+    fusion_type: str = "concat"
     num_levels: int = 4
+    # cross_attn-only fields (ignored by concat fusion):
     d_fusion: int = 512
-    num_heads: int = 8       # only used when fusion_type="cross_attn"
+    num_heads: int = 8
     ffn_ratio: float = 4.0
     dropout: float = 0.0
+
+    @property
+    def fused_dim(self) -> int:
+        """Output channel dim of the aligned-concat fusion (fixed, no projection)."""
+        return self.vggt_out_dim + self.jepa_embed_dim   # 2048 + 1024 = 3072
 
     # ── Checkpoints ───────────────────────────────────────────────────────────
     vggt_ckpt: str = field(default_factory=lambda: os.path.join(_ROOT, "ckpts", "vggt.pt"))

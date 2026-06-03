@@ -3,11 +3,11 @@ FusionGVJEPA: VL-JEPA training head on top of FusionGV.
 
 Architecture (paper: arXiv 2512.10942v2)
 -----------------------------------------
-    FusionGV (X-encoder, frozen encoders + trainable fusion)
-        → list of 4 × (B, S, 1369, D_f)
+    FusionGV (X-encoder, frozen encoders + concat fusion)
+        → list of 4 × (B, S, 1369, D_fused)   D_fused = 3072 for "concat"
 
     level select + spatial mean-pool
-        → (B, S, D_f)
+        → (B, S, D_fused)
 
     vis_proj  → (B, S, D_pred)
 
@@ -180,13 +180,14 @@ class FusionGVJEPA(nn.Module):
         self.config = config
 
         h = config.predictor_hidden_size
-        D_f = config.fusion.d_fusion
+        # D_fused = vggt_out_dim + jepa_embed_dim (= 3072 for default concat fusion)
+        D_fused = config.fusion.fused_dim
 
         # ── X-encoder (visual) ───────────────────────────────────────────────
         self.x_encoder = FusionGV(config.fusion)
 
-        # Project fused spatial features to predictor dim
-        self.vis_proj = nn.Linear(D_f, h) if D_f != h else nn.Identity()
+        # Project concat-fused spatial features to predictor dim
+        self.vis_proj = nn.Linear(D_fused, h)
 
         # ── Query encoder (frozen) ───────────────────────────────────────────
         if config.query_model_name == "toy":

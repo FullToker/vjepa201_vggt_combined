@@ -7,7 +7,7 @@ Usage
 -----
     from fusion_gv import FusionGV, FusionConfig, preprocess
 
-    cfg   = FusionConfig(d_fusion=512)
+    cfg   = FusionConfig()          # fusion_type="concat" by default
     model = FusionGV(cfg).cuda()
 
     # preprocess accepts file paths or PIL Images
@@ -18,7 +18,7 @@ Usage
     images_jepa = images_jepa.cuda()
 
     fused = model(images_vggt, images_jepa)
-    # fused: list of 4 × (1, S, 1369, 512)
+    # fused: list of 4 × (1, S, 1369, 3072)   [concat fusion, no projection]
 """
 
 import torch
@@ -29,11 +29,11 @@ from fusion_gv.encoders import FrozenVGGT, FrozenJEPA
 from fusion_gv.fusion import MultiLevelFusion
 from fusion_gv.fusion_aligned import AlignedMultiLevelFusion
 
-_FUSION_TYPES = ("add", "cross_attn")
+_FUSION_TYPES = ("concat", "cross_attn")
 
 
 def _build_fusion(config: FusionConfig) -> nn.Module:
-    if config.fusion_type == "add":
+    if config.fusion_type == "concat":
         return AlignedMultiLevelFusion(
             num_levels=config.num_levels,
             vggt_dim=config.vggt_out_dim,
@@ -67,9 +67,11 @@ class FusionGV(nn.Module):
         FrozenVGGT  — geometric features, 4 levels × (B, S, 1369, 2048)
         FrozenJEPA  — semantic features,  4 levels × (B, S,  576, 1024)
 
-    Trainable fusion module (selected by config.fusion_type):
-        "add"        → AlignedMultiLevelFusion  (interpolation + add, default)
-        "cross_attn" → MultiLevelFusion         (cross-attention)
+    Fusion module (selected by config.fusion_type):
+        "concat"     → AlignedMultiLevelFusion  (bilinear spatial align + concat, default)
+                       no trainable parameters; output dim = vggt_out_dim + jepa_embed_dim = 3072
+        "cross_attn" → MultiLevelFusion         (cross-attention, learnable)
+                       output dim = config.d_fusion
 
     Args:
         config : FusionConfig instance (uses defaults if None)
@@ -98,7 +100,8 @@ class FusionGV(nn.Module):
             images_jepa : (B*S, 3, 1, 384, 384) float32, ImageNet-normalised
 
         Returns:
-            list of 4 × (B, S, 1369, D_f)
+            list of 4 × (B, S, 1369, D_fused)
+            D_fused = 3072 for "concat", d_fusion for "cross_attn"
             index 0 = early features, index 3 = final features
         """
         B, S = images_vggt.shape[:2]
@@ -109,5 +112,9 @@ class FusionGV(nn.Module):
         return self.fusion(vggt_feats, jepa_feats)            # 4 × (B, S, 1369, D_f)
 
     def trainable_parameters(self):
-        """Returns only the fusion module parameters (encoders are frozen)."""
+        """Returns trainable parameters (fusion module only; encoders are frozen).
+
+        Note: AlignedMultiLevelFusion (concat) has no learnable parameters,
+        so this returns an empty iterator when fusion_type='concat'.
+        """
         return self.fusion.parameters()

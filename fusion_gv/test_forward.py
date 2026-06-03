@@ -73,33 +73,35 @@ print("\n=== Phase 3: fusion module shapes (random tensors, no weights) ===")
 from fusion_gv.fusion import MultiLevelFusion
 from fusion_gv.fusion_aligned import AlignedMultiLevelFusion
 
-B, S, D_f = 1, 8, 512
+B, S = 1, 8
+D_concat = 3072   # vggt_out_dim(2048) + jepa_embed_dim(1024)
+D_cross  = 512    # d_fusion used by cross_attn
 
 def _make_feats():
     vggt = [torch.randn(B, S, 1369, 2048) for _ in range(4)]
     jepa = [torch.randn(B, S,  576, 1024) for _ in range(4)]
     return vggt, jepa
 
-def _test_aligned():
+def _test_aligned_concat():
     m = AlignedMultiLevelFusion()
     vggt, jepa = _make_feats()
     out = m(vggt, jepa)
     assert len(out) == 4
     for i, t in enumerate(out):
-        assert t.shape == (B, S, 1369, 3072), f"level {i}: {t.shape}"
+        assert t.shape == (B, S, 1369, D_concat), f"level {i}: {t.shape}"
     return [t.shape for t in out]
 
 def _test_cross_attn():
-    m = MultiLevelFusion(d_fusion=D_f, num_heads=8)
+    m = MultiLevelFusion(d_fusion=D_cross, num_heads=8)
     vggt, jepa = _make_feats()
     out = m(vggt, jepa)
     assert len(out) == 4
     for i, t in enumerate(out):
-        assert t.shape == (B, S, 1369, D_f), f"level {i}: {t.shape}"
+        assert t.shape == (B, S, 1369, D_cross), f"level {i}: {t.shape}"
     return [t.shape for t in out]
 
-r1 = check("AlignedMultiLevelFusion  (add)        4 levels → (B,S,1369,3072)", _test_aligned)
-r2 = check("MultiLevelFusion         (cross_attn) 4 levels → (B,S,1369,512)", _test_cross_attn)
+r1 = check("AlignedMultiLevelFusion  (concat)     4 levels → (B,S,1369,3072)", _test_aligned_concat)
+r2 = check("MultiLevelFusion         (cross_attn) 4 levels → (B,S,1369,512)",  _test_cross_attn)
 if r1:
     print(f"         output per level : {r1[0]}")
 
@@ -123,8 +125,8 @@ if not os.path.exists(vggt_ckpt) or not os.path.exists(jepa_ckpt):
 else:
     from fusion_gv.model import FusionGV
 
-    def _test_full_add():
-        cfg = FusionConfig(fusion_type="add")
+    def _test_full_concat():
+        cfg = FusionConfig(fusion_type="concat")
         model = FusionGV(cfg).eval()
         imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
         vggt_t, jepa_t = preprocess(imgs)
@@ -132,11 +134,11 @@ else:
             out = model(vggt_t, jepa_t)
         assert len(out) == 4
         for t in out:
-            assert t.shape == (1, S, 1369, 3072)   # vggt_dim + jepa_dim, no projection
+            assert t.shape == (1, S, 1369, D_concat)   # vggt_dim + jepa_dim, no projection
         return out[0].shape
 
     def _test_full_cross():
-        cfg = FusionConfig(d_fusion=D_f, fusion_type="cross_attn")
+        cfg = FusionConfig(d_fusion=D_cross, fusion_type="cross_attn")
         model = FusionGV(cfg).eval()
         imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
         vggt_t, jepa_t = preprocess(imgs)
@@ -144,10 +146,10 @@ else:
             out = model(vggt_t, jepa_t)
         assert len(out) == 4
         for t in out:
-            assert t.shape == (1, S, 1369, D_f)
+            assert t.shape == (1, S, 1369, D_cross)
         return out[0].shape
 
-    r3 = check("FusionGV fusion_type='add'        end-to-end", _test_full_add)
+    r3 = check("FusionGV fusion_type='concat'     end-to-end", _test_full_concat)
     r4 = check("FusionGV fusion_type='cross_attn' end-to-end", _test_full_cross)
     if r3:
         print(f"         output per level : {r3}")
