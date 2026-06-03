@@ -1,0 +1,134 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FusionGVJEPA  ·  SFT stage  ·  concat fusion  (vggt + vjepa2.1)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Architecture recap:
+#   FrozenVGGT  (2048-d, 37×37 patches)  ─┐
+#                                          ├─► AlignedMultiLevelFusion (concat)
+#   FrozenJEPA  (1024-d, 24×24 patches)  ─┘      → 4 × (B, S, 1369, 3072)
+#                                                           │  level 3 + mean-pool
+#                                                           ▼
+#                                                     (B, S, 3072)
+#                                                           │  vis_proj
+#                                                           ▼
+#                                                    Predictor (bidir Transformer)
+#                                                   + query tokens (query_model)
+#                                                           │  pred_proj
+#                                                           ▼
+#                                                    (B, shared_embed_dim)
+#                                                           │
+#                                              InfoNCE ◄────┤
+#                                                           │
+#                                                    (B, shared_embed_dim)
+#                                                           ▲  y_proj
+#                                                    Y-Encoder (y_encoder_name)
+#                                                    ← trained at lr × 0.05 →
+#
+# Run:
+#   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/sft_vv_concat.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# ── Frozen visual encoders + concat fusion ────────────────────────────────────
+fusion:
+  # Checkpoint paths (relative to project root or absolute)
+  vggt_ckpt: ./ckpts/vggt.pt
+  jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
+
+  # Encoder geometry (do not change unless you swap backbones)
+  vggt_img_size:       518
+  vggt_patch_size:     14        # 518 / 14 = 37  →  37×37 = 1369 patches
+  vggt_embed_dim:      1024
+  vggt_out_dim:        2048      # frame_inter ∥ global_inter = 2 × embed_dim
+  vggt_num_patches:    1369
+  jepa_img_size:       384
+  jepa_patch_size:     16        # 384 / 16 = 24  →  24×24 = 576 patches
+  jepa_embed_dim:      1024
+  jepa_num_patches:    576
+
+  # Fusion strategy — "concat" is the only parameter-free option
+  fusion_type: concat            # bilinear spatial-align + channel concat → 3072-d
+  num_levels:  4                 # 4 aligned levels tapped from both encoders
+
+
+# ── Predictor + projection heads ──────────────────────────────────────────────
+model:
+  # Which of the 4 fusion levels feeds the predictor (0=early … 3=final)
+  use_fusion_level: 3
+
+  # Bidirectional transformer predictor
+  predictor_hidden_size: 1024    # vis_proj maps 3072 → this dim
+  predictor_layers:      8
+  predictor_heads:       16
+  predictor_ffn_mult:    4
+  predictor_dropout:     0.1
+
+  # Query encoder (conditions the predictor; frozen during training)
+  # Llama-3.2-1B is used as a lightweight but capable instruction-following encoder.
+  query_model_name: meta-llama/Llama-3.2-1B
+  max_query_tokens:  256
+
+  # Y-Encoder (encodes training targets; trained with slow LR)
+  # gemma-embedding-300m is Google's dedicated embedding model (300 M params).
+  y_encoder_name:    google/gemma-embedding-300m
+  max_target_tokens: 256
+
+  # Shared embedding space dimension (pred and target are projected here)
+  shared_embed_dim: 1536         # matches VL-JEPA paper Sec. 3.1
+
+  # Y-Encoder LR multiplier (paper Sec. 3.2, Tab. 7b)
+  y_encoder_lr_multiplier: 0.05
+
+  # HuggingFace model cache — all downloaded weights land here
+  hf_cache_dir: ./ckpts
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+data:
+  train_manifests:
+    - ./data/train.jsonl
+    # Additional manifests can be listed here; they are concatenated.
+    # Each JSONL row format:
+    #   {"images": ["frame1.jpg", ...], "query": "...", "target": "..."}
+    # Single-image variant:
+    #   {"image": "img.jpg", "query": "...", "target": "..."}
+
+  # Number of frames (S) per scene sequence fed to FusionGV
+  # S=1 → single image per sample; increase for multi-view / video input
+  num_frames: 1
+
+  num_workers: 4
+
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+train:
+  seed:    42
+  device:  cuda
+  precision: bf16                # "bf16" or "fp16"
+
+  output_dir: ./outputs/sft_vv_concat
+
+  # FusionGV is much heavier than a plain ViT:
+  # VGGT input 518×518 + JEPA input 384×384 per frame.
+  # Use gradient_accumulation to reach an effective batch of 128.
+  batch_size:                   8
+  gradient_accumulation_steps:  16   # effective batch = 8 × 16 = 128
+
+  # ~3 epochs over a 100 k-sample dataset at effective batch 128:
+  #   ceil(100000 / 128) = 782 steps/epoch × 3 ≈ 2350 steps
+  max_steps: 2350
+
+  clip_grad_norm: 1.0
+  log_every:  50
+  save_every: 500
+
+  # Optimizer (AdamW)
+  learning_rate: 5.0e-5
+  min_lr:        1.0e-6          # cosine annealing floor
+  weight_decay:  0.01
+  adam_beta1:    0.9
+  adam_beta2:    0.95
+  adam_eps:      1.0e-8
+
+  scheduler:   cosine            # "cosine" or "constant"
+  temperature: 0.07              # InfoNCE temperature

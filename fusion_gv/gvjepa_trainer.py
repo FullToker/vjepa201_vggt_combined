@@ -278,7 +278,7 @@ class GVJEPATrainer:
         pbar.close()
 
 
-# ── Factory helpers ─────────────────────────────────────────────────────────────
+# ── Low-level factory helpers (manual use) ─────────────────────────────────────
 
 def build_optimizer(
     model: FusionGVJEPA,
@@ -304,3 +304,101 @@ def build_cosine_scheduler(
     return torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max_steps, eta_min=min_lr
     )
+
+
+# ── Config-dict factory helpers (YAML-driven use) ──────────────────────────────
+
+def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
+    """Instantiate FusionGVJEPA from a parsed YAML config dict."""
+    from fusion_gv.config import FusionConfig
+    from fusion_gv.gvjepa import FusionGVJEPA, GVJEPAConfig
+
+    f = cfg["fusion"]
+    fusion_cfg = FusionConfig(
+        vggt_ckpt=f["vggt_ckpt"],
+        jepa_ckpt=f["jepa_ckpt"],
+        fusion_type=f.get("fusion_type", "concat"),
+        num_levels=f.get("num_levels", 4),
+        # encoder geometry (use dataclass defaults if not specified)
+        **{k: f[k] for k in (
+            "vggt_img_size", "vggt_patch_size", "vggt_embed_dim",
+            "vggt_out_dim", "vggt_num_patches",
+            "jepa_img_size", "jepa_patch_size", "jepa_embed_dim", "jepa_num_patches",
+        ) if k in f},
+    )
+
+    m = cfg["model"]
+    model_cfg = GVJEPAConfig(
+        fusion=fusion_cfg,
+        use_fusion_level=m.get("use_fusion_level", 3),
+        predictor_hidden_size=m["predictor_hidden_size"],
+        predictor_layers=m["predictor_layers"],
+        predictor_heads=m["predictor_heads"],
+        predictor_ffn_mult=m["predictor_ffn_mult"],
+        predictor_dropout=m.get("predictor_dropout", 0.0),
+        query_model_name=m.get("query_model_name", "toy"),
+        max_query_tokens=m.get("max_query_tokens", 64),
+        y_encoder_name=m.get("y_encoder_name", "toy"),
+        max_target_tokens=m.get("max_target_tokens", 64),
+        shared_embed_dim=m["shared_embed_dim"],
+        y_encoder_lr_multiplier=m.get("y_encoder_lr_multiplier", 0.05),
+        hf_cache_dir=m.get("hf_cache_dir", "./ckpts"),
+    )
+    return FusionGVJEPA(model_cfg)
+
+
+def build_loader_from_config(cfg: dict) -> DataLoader:
+    """Build DataLoader from a parsed YAML config dict."""
+    from pathlib import Path
+
+    dcfg = cfg["data"]
+    manifests = dcfg["train_manifests"]
+    datasets = []
+    for path in manifests:
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Training manifest not found: {path}")
+        datasets.append(GVJEPADataset(path))
+
+    if len(datasets) == 1:
+        ds = datasets[0]
+    else:
+        from torch.utils.data import ConcatDataset
+        ds = ConcatDataset(datasets)
+
+    return DataLoader(
+        ds,
+        batch_size=cfg["train"]["batch_size"],
+        shuffle=True,
+        num_workers=dcfg.get("num_workers", 4),
+        pin_memory=True,
+        collate_fn=gvjepa_collate,
+        drop_last=True,
+    )
+
+
+def build_optimizer_and_scheduler_from_config(
+    model: "FusionGVJEPA",
+    cfg: dict,
+) -> tuple:
+    """Build (optimizer, scheduler | None) from a parsed YAML config dict."""
+    tcfg = cfg["train"]
+    optimizer = torch.optim.AdamW(
+        model.parameter_groups(
+            lr=tcfg["learning_rate"],
+            weight_decay=tcfg.get("weight_decay", 0.01),
+        ),
+        betas=(tcfg.get("adam_beta1", 0.9), tcfg.get("adam_beta2", 0.95)),
+        eps=tcfg.get("adam_eps", 1e-8),
+    )
+    sched_name = tcfg.get("scheduler", "constant")
+    if sched_name == "cosine":
+        scheduler = build_cosine_scheduler(
+            optimizer,
+            max_steps=tcfg["max_steps"],
+            min_lr=tcfg.get("min_lr", 0.0),
+        )
+    elif sched_name == "constant":
+        scheduler = None
+    else:
+        raise ValueError(f"Unknown scheduler: {sched_name!r}")
+    return optimizer, scheduler

@@ -162,6 +162,10 @@ class GVJEPAConfig:
     # Which of the 4 fusion levels to use as visual tokens (0=early, 3=final)
     use_fusion_level: int = 3
 
+    # Local directory where HuggingFace model weights are cached
+    # All AutoModel / AutoTokenizer downloads land here (mirrors ./ckpts layout)
+    hf_cache_dir: str = "./ckpts"
+
 
 # ── Model ──────────────────────────────────────────────────────────────────────
 
@@ -199,11 +203,16 @@ class FusionGVJEPA(nn.Module):
             except ImportError as exc:
                 raise ImportError("transformers is required for non-toy query encoder") from exc
             self.query_tokenizer = AutoTokenizer.from_pretrained(
-                config.query_model_name, use_fast=True
+                config.query_model_name,
+                use_fast=True,
+                cache_dir=config.hf_cache_dir,
             )
             if self.query_tokenizer.pad_token is None:
                 self.query_tokenizer.pad_token = self.query_tokenizer.eos_token
-            self.query_encoder = AutoModel.from_pretrained(config.query_model_name)
+            self.query_encoder = AutoModel.from_pretrained(
+                config.query_model_name,
+                cache_dir=config.hf_cache_dir,
+            )
 
         for p in self.query_encoder.parameters():
             p.requires_grad_(False)
@@ -233,9 +242,14 @@ class FusionGVJEPA(nn.Module):
                 from transformers import AutoModel, AutoTokenizer
             except ImportError as exc:
                 raise ImportError("transformers is required for non-toy y-encoder") from exc
-            self.y_encoder = AutoModel.from_pretrained(config.y_encoder_name)
+            self.y_encoder = AutoModel.from_pretrained(
+                config.y_encoder_name,
+                cache_dir=config.hf_cache_dir,
+            )
             self.y_tokenizer = AutoTokenizer.from_pretrained(
-                config.y_encoder_name, use_fast=True
+                config.y_encoder_name,
+                use_fast=True,
+                cache_dir=config.hf_cache_dir,
             )
             if self.y_tokenizer.pad_token is None:
                 self.y_tokenizer.pad_token = self.y_tokenizer.eos_token
