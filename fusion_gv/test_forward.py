@@ -124,7 +124,7 @@ else:
     from fusion_gv.model import FusionGV
 
     def _test_full_add():
-        cfg = FusionConfig(d_fusion=D_f, fusion_type="add")
+        cfg = FusionConfig(fusion_type="add")
         model = FusionGV(cfg).eval()
         imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
         vggt_t, jepa_t = preprocess(imgs)
@@ -132,7 +132,7 @@ else:
             out = model(vggt_t, jepa_t)
         assert len(out) == 4
         for t in out:
-            assert t.shape == (1, S, 1369, D_f)
+            assert t.shape == (1, S, 1369, 3072)   # vggt_dim + jepa_dim, no projection
         return out[0].shape
 
     def _test_full_cross():
