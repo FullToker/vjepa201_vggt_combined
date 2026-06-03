@@ -81,12 +81,12 @@ def _make_feats():
     return vggt, jepa
 
 def _test_aligned():
-    m = AlignedMultiLevelFusion(d_fusion=D_f)
+    m = AlignedMultiLevelFusion()
     vggt, jepa = _make_feats()
     out = m(vggt, jepa)
     assert len(out) == 4
     for i, t in enumerate(out):
-        assert t.shape == (B, S, 1369, D_f), f"level {i}: {t.shape}"
+        assert t.shape == (B, S, 1369, 3072), f"level {i}: {t.shape}"
     return [t.shape for t in out]
 
 def _test_cross_attn():
@@ -98,7 +98,7 @@ def _test_cross_attn():
         assert t.shape == (B, S, 1369, D_f), f"level {i}: {t.shape}"
     return [t.shape for t in out]
 
-r1 = check("AlignedMultiLevelFusion  (add)        4 levels → (B,S,1369,512)", _test_aligned)
+r1 = check("AlignedMultiLevelFusion  (add)        4 levels → (B,S,1369,3072)", _test_aligned)
 r2 = check("MultiLevelFusion         (cross_attn) 4 levels → (B,S,1369,512)", _test_cross_attn)
 if r1:
     print(f"         output per level : {r1[0]}")
