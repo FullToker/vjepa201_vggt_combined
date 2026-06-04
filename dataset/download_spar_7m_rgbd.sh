@@ -18,8 +18,7 @@ Options:
   -h, --help         Show this help.
 
 Prerequisites:
-  pip install hf
-  hf auth login
+  wget
 USAGE
 }
 
@@ -53,19 +52,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! command -v hf >/dev/null 2>&1; then
-  echo "Missing 'hf' CLI. Install it with: pip install hf" >&2
+if ! command -v wget >/dev/null 2>&1; then
+  echo "Missing 'wget'. Install it with: sudo apt install wget" >&2
   exit 1
 fi
 
 ARCHIVE_DIR="${OUTPUT_DIR%/}/SPAR-7M-RGBD"
+BASE_URL="https://huggingface.co/datasets/${REPO_ID}/resolve/main"
 mkdir -p "$ARCHIVE_DIR"
 
 echo "Downloading ${REPO_ID} archives to: ${ARCHIVE_DIR}"
-hf download "$REPO_ID" \
-  --repo-type dataset \
-  --local-dir "$ARCHIVE_DIR" \
-  --include 'spar-rgbd-*.tar.gz' 'spar-rgbd-sha256.txt'
+for i in $(seq -w 0 17); do
+  wget -c "${BASE_URL}/spar-rgbd-${i}.tar.gz" -P "$ARCHIVE_DIR"
+done
+wget -c "${BASE_URL}/spar-rgbd-sha256.txt" -P "$ARCHIVE_DIR"
 
 if [[ -f "${ARCHIVE_DIR}/spar-rgbd-sha256.txt" ]]; then
   if command -v sha256sum >/dev/null 2>&1; then
