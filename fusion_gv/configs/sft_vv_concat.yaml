@@ -70,7 +70,7 @@ model:
 
   # Y-Encoder (encodes training targets; trained with slow LR)
   # gemma-embedding-300m is Google's dedicated embedding model (300 M params).
-  y_encoder_name:    google/gemma-embedding-300m
+  y_encoder_name:    google/embeddinggemma-300m
   max_target_tokens: 256
 
   # Shared embedding space dimension (pred and target are projected here)
