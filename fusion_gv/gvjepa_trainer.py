@@ -315,7 +315,9 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
 
     f = cfg["fusion"]
     fusion_cfg = FusionConfig(
-        vggt_ckpt=f["vggt_ckpt"],
+        x_encoder_type=f.get("x_encoder_type", "fusion_gv"),
+        x_encoder_output_dim=f.get("x_encoder_output_dim"),
+        vggt_ckpt=f.get("vggt_ckpt", "./ckpts/vggt.pt"),
         jepa_ckpt=f["jepa_ckpt"],
         fusion_type=f.get("fusion_type", "concat"),
         num_levels=f.get("num_levels", 4),

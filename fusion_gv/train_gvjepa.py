@@ -33,10 +33,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train FusionGVJEPA")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to YAML config file")
+    parser.add_argument(
+        "--x-encoder-type",
+        choices=("fusion_gv", "vjepa"),
+        default=None,
+        help="Override fusion.x_encoder_type from the YAML config",
+    )
+    parser.add_argument(
+        "--x-encoder-output-dim",
+        type=int,
+        default=None,
+        help="Override fusion.x_encoder_output_dim from the YAML config",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+
+    cfg.setdefault("fusion", {})
+    if args.x_encoder_type is not None:
+        cfg["fusion"]["x_encoder_type"] = args.x_encoder_type
+    if args.x_encoder_output_dim is not None:
+        cfg["fusion"]["x_encoder_output_dim"] = args.x_encoder_output_dim
 
     tcfg = cfg["train"]
     _set_seed(tcfg.get("seed", 42))

@@ -12,8 +12,16 @@ FrozenJEPA
             levels correspond to ViT-L blocks {5, 11, 17, 23}
 """
 
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_LOCAL_VGGT_ROOT = _REPO_ROOT / "vggt"
+if _LOCAL_VGGT_ROOT.exists() and str(_LOCAL_VGGT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LOCAL_VGGT_ROOT))
 
 from vggt.models.vggt import VGGT
 from app.vjepa_2_1.models import vision_transformer as jepa_vit

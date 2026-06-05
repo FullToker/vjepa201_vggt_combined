@@ -30,6 +30,7 @@ from fusion_gv.fusion import MultiLevelFusion
 from fusion_gv.fusion_aligned import AlignedMultiLevelFusion
 
 _FUSION_TYPES = ("concat", "cross_attn")
+_X_ENCODER_TYPES = ("fusion_gv", "vjepa")
 
 
 def _build_fusion(config: FusionConfig) -> nn.Module:
@@ -56,6 +57,47 @@ def _build_fusion(config: FusionConfig) -> nn.Module:
         )
     raise ValueError(
         f"Unknown fusion_type '{config.fusion_type}'. Choose from {_FUSION_TYPES}."
+    )
+
+
+class VJEPAOnlyXEncoder(nn.Module):
+    """V-JEPA-only X-encoder with the same output contract as FusionGV."""
+
+    def __init__(self, config: FusionConfig | None = None):
+        super().__init__()
+        if config is None:
+            config = FusionConfig(x_encoder_type="vjepa")
+        self.config = config
+        self.jepa_encoder = FrozenJEPA(config.jepa_ckpt)
+
+    def forward(
+        self,
+        images_vggt: torch.Tensor | None,
+        images_jepa: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        """Return 4 levels of V-JEPA features: (B, S, 576, 1024)."""
+        if images_vggt is not None:
+            B, S = images_vggt.shape[:2]
+        else:
+            B = 1
+            S = images_jepa.shape[0]
+        return self.jepa_encoder(images_jepa, B, S)
+
+    def trainable_parameters(self):
+        return iter(())
+
+
+def build_x_encoder(config: FusionConfig | None = None) -> nn.Module:
+    """Build the configured visual X-encoder."""
+    if config is None:
+        config = FusionConfig()
+    if config.x_encoder_type == "fusion_gv":
+        return FusionGV(config)
+    if config.x_encoder_type == "vjepa":
+        return VJEPAOnlyXEncoder(config)
+    raise ValueError(
+        f"Unknown x_encoder_type '{config.x_encoder_type}'. "
+        f"Choose from {_X_ENCODER_TYPES}."
     )
 
 

@@ -55,7 +55,7 @@ import torch
 import torch.nn as nn
 
 from fusion_gv.config import FusionConfig
-from fusion_gv.model import FusionGV
+from fusion_gv.model import build_x_encoder
 
 
 # ── Toy components for offline / unit-test use ─────────────────────────────────
@@ -184,11 +184,12 @@ class FusionGVJEPA(nn.Module):
         self.config = config
 
         h = config.predictor_hidden_size
-        # D_fused = vggt_out_dim + jepa_embed_dim (= 3072 for default concat fusion)
-        D_fused = config.fusion.fused_dim
+        # Visual dim is configurable so future fusion projections do not require
+        # changing this head. Defaults: fusion_gv=3072, vjepa=1024.
+        D_fused = config.fusion.visual_dim
 
         # ── X-encoder (visual) ───────────────────────────────────────────────
-        self.x_encoder = FusionGV(config.fusion)
+        self.x_encoder = build_x_encoder(config.fusion)
 
         # Project concat-fused spatial features to predictor dim
         self.vis_proj = nn.Linear(D_fused, h)
@@ -270,8 +271,8 @@ class FusionGVJEPA(nn.Module):
 
         Returns: (B, S, D_f)
         """
-        feats = self.x_encoder(images_vggt, images_jepa)  # 4 × (B, S, 1369, D_f)
-        feat = feats[self.config.use_fusion_level]         # (B, S, 1369, D_f)
+        feats = self.x_encoder(images_vggt, images_jepa)  # 4 × (B, S, P, D_f)
+        feat = feats[self.config.use_fusion_level]         # (B, S, P, D_f)
         return feat.mean(dim=2)                            # (B, S, D_f)
 
     def _tokenize(self, tokenizer, texts: list[str], max_length: int, device: torch.device):

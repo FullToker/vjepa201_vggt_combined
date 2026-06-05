@@ -12,8 +12,13 @@ Run from project root:
     python fusion_gv/test_forward.py
 """
 
+import os
 import sys
 import traceback
+
+ROOT = os.path.dirname(os.path.dirname(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 import torch
 from PIL import Image
@@ -40,12 +45,22 @@ print("\n=== Phase 1: imports + config ===")
 cfg = check("import FusionConfig", lambda: (
     __import__("fusion_gv.config", fromlist=["FusionConfig"]).FusionConfig()
 ))
+
+def _test_encoder_dim_config():
+    FusionConfig = __import__("fusion_gv.config", fromlist=["FusionConfig"]).FusionConfig
+    assert FusionConfig(x_encoder_type="fusion_gv").visual_dim == 3072
+    assert FusionConfig(x_encoder_type="vjepa").visual_dim == 1024
+    assert FusionConfig(x_encoder_type="vjepa", x_encoder_output_dim=768).visual_dim == 768
+
+check("FusionConfig x_encoder_type / x_encoder_output_dim", _test_encoder_dim_config)
 check("import MultiLevelFusion",
       lambda: __import__("fusion_gv.fusion", fromlist=["MultiLevelFusion"]))
 check("import AlignedMultiLevelFusion",
       lambda: __import__("fusion_gv.fusion_aligned", fromlist=["AlignedMultiLevelFusion"]))
 check("import preprocess",
       lambda: __import__("fusion_gv.preprocess", fromlist=["preprocess"]))
+check("import build_x_encoder",
+      lambda: __import__("fusion_gv.model", fromlist=["build_x_encoder"]))
 
 
 # ── Phase 2: preprocess ────────────────────────────────────────────────────────
@@ -109,10 +124,7 @@ if r1:
 # ── Phase 4: full FusionGV (requires ckpts/) ──────────────────────────────────
 print("\n=== Phase 4: full FusionGV forward (requires ckpts/) ===")
 
-import os
 from fusion_gv.config import FusionConfig
-
-ROOT = os.path.dirname(os.path.dirname(__file__))
 vggt_ckpt = os.path.join(ROOT, "ckpts", "vggt.pt")
 jepa_ckpt = os.path.join(ROOT, "ckpts", "vjepa2_1_vitl_dist_vitG_384.pt")
 
@@ -153,6 +165,56 @@ else:
     r4 = check("FusionGV fusion_type='cross_attn' end-to-end", _test_full_cross)
     if r3:
         print(f"         output per level : {r3}")
+
+
+# ── Phase 5: V-JEPA-only X-encoder forward ───────────────────────────────────
+print("\n=== Phase 5: V-JEPA-only X-encoder forward (requires V-JEPA ckpt) ===")
+
+if not os.path.exists(jepa_ckpt):
+    print(f"  [{SKIP}] checkpoint not found: ckpts/vjepa2_1_vitl_dist_vitG_384.pt")
+    print(f"           run: python download_ckpts.py")
+else:
+    from fusion_gv.model import VJEPAOnlyXEncoder
+    from fusion_gv.gvjepa import FusionGVJEPA, GVJEPAConfig
+
+    def _test_vjepa_only_xencoder():
+        cfg = FusionConfig(x_encoder_type="vjepa")
+        model = VJEPAOnlyXEncoder(cfg).eval()
+        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
+        vggt_t, jepa_t = preprocess(imgs)
+        with torch.no_grad():
+            out = model(vggt_t, jepa_t)
+        assert len(out) == 4
+        for t in out:
+            assert t.shape == (1, S, 576, 1024), t.shape
+        return out[0].shape
+
+    def _test_gvjepa_with_vjepa_xencoder():
+        fusion_cfg = FusionConfig(x_encoder_type="vjepa")
+        model_cfg = GVJEPAConfig(
+            fusion=fusion_cfg,
+            predictor_hidden_size=128,
+            predictor_layers=1,
+            predictor_heads=4,
+            shared_embed_dim=64,
+            query_model_name="toy",
+            y_encoder_name="toy",
+        )
+        model = FusionGVJEPA(model_cfg).eval()
+        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
+        vggt_t, jepa_t = preprocess(imgs)
+        with torch.no_grad():
+            out = model(vggt_t, jepa_t, queries=["describe scene"], targets=["a scene"])
+        assert out["pred"].shape == (1, 64), out["pred"].shape
+        assert out["target"].shape == (1, 64), out["target"].shape
+        return out["pred"].shape
+
+    r5 = check("VJEPAOnlyXEncoder forward → 4 levels of (B,S,576,1024)", _test_vjepa_only_xencoder)
+    r6 = check("FusionGVJEPA x_encoder_type='vjepa' forward", _test_gvjepa_with_vjepa_xencoder)
+    if r5:
+        print(f"         output per level : {r5}")
+    if r6:
+        print(f"         pred embedding   : {r6}")
 
 
 print("\n=== done ===\n")

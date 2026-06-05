@@ -31,6 +31,11 @@
 
 # ── Frozen visual encoders + concat fusion ────────────────────────────────────
 fusion:
+  # X-encoder mode: "fusion_gv" = current VGGT + V-JEPA concat, "vjepa" = V-JEPA only
+  x_encoder_type: fusion_gv
+  # Optional explicit visual feature dim. Defaults: fusion_gv=3072, vjepa=1024.
+  x_encoder_output_dim: null
+
   # Checkpoint paths (relative to project root or absolute)
   vggt_ckpt: ./ckpts/vggt.pt
   jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
