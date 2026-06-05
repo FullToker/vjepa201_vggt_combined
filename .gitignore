@@ -73,6 +73,8 @@ __pypackages__/
 # ── checkpoints ────────────────────────────────────────────────────────────────
 ckpts/
 source_data/
+data/spar_trian.jsonl
+data/spar_eva.jsonl
 
 # ── vggt-specific paths ────────────────────────────────────────────────────────
 vggt/.hydra/
