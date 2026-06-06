@@ -176,6 +176,7 @@ class GVJEPATrainer:
         log_every: int = 20,
         save_every: int = 1000,
         precision: str = "bf16",
+        mlflow_logger=None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("`max_steps` must be > 0.")
@@ -193,34 +194,39 @@ class GVJEPATrainer:
         self.temperature = temperature
         self.log_every = log_every
         self.save_every = save_every
+        self.mlflow_logger = mlflow_logger
         self.scaler = torch.amp.GradScaler("cuda", enabled=(precision == "fp16"))
         self.autocast_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _save_ckpt(self, step: int) -> None:
+    def _save_ckpt(self, step: int, filename: str | None = None) -> Path:
         ckpt = {
             "step": step,
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict() if self.scheduler else None,
         }
-        torch.save(ckpt, self.output_dir / f"step_{step:07d}.pt")
+        path = self.output_dir / (filename or f"step_{step:07d}.pt")
+        torch.save(ckpt, path)
+        return path
 
-    def _write_meta(self, device: torch.device) -> None:
+    def _write_meta(self, device: torch.device) -> Path:
         meta = {
             "torch_version": torch.__version__,
             "cuda_available": torch.cuda.is_available(),
             "device": str(device),
             "hostname": platform.node(),
         }
-        with open(self.output_dir / "run_meta.json", "w") as f:
+        path = self.output_dir / "run_meta.json"
+        with open(path, "w") as f:
             json.dump(meta, f, indent=2)
+        return path
 
     def fit(self, device: torch.device) -> None:
         """Run training until max_steps is reached."""
         self.model.to(device)
         self.model.train()
-        self._write_meta(device)
+        meta_path = self._write_meta(device)
         log_path = self.output_dir / "train_log.jsonl"
 
         step = 0
@@ -266,15 +272,22 @@ class GVJEPATrainer:
                     }
                     with open(log_path, "a") as f:
                         f.write(json.dumps(entry) + "\n")
+                    if self.mlflow_logger is not None:
+                        self.mlflow_logger.log_metrics(
+                            {"train/loss": entry["loss"], "train/lr": entry["lr"]},
+                            step=step,
+                        )
                     running_loss = 0.0
 
-                if step % self.save_every == 0:
+                if self.save_every and self.save_every > 0 and step % self.save_every == 0:
                     self._save_ckpt(step)
 
                 if step >= self.max_steps:
                     break
 
-        self._save_ckpt(step)
+        final_ckpt = self._save_ckpt(step, filename="final.pt")
+        if self.mlflow_logger is not None:
+            self.mlflow_logger.log_artifacts([final_ckpt, meta_path, log_path])
         pbar.close()
 
 

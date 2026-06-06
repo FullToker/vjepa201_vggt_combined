@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
 
+from fusion_gv.mlflow_utils import start_mlflow_run
 from fusion_gv.gvjepa_trainer import (
     GVJEPATrainer,
     build_loader_from_config,
@@ -66,21 +68,32 @@ def main() -> None:
     loader    = build_loader_from_config(cfg)
     optimizer, scheduler = build_optimizer_and_scheduler_from_config(model, cfg)
 
-    trainer = GVJEPATrainer(
-        model=model,
-        optimizer=optimizer,
-        train_loader=loader,
-        output_dir=tcfg["output_dir"],
-        max_steps=tcfg["max_steps"],
-        scheduler=scheduler,
-        grad_accum_steps=tcfg.get("gradient_accumulation_steps", 1),
-        clip_grad_norm=tcfg.get("clip_grad_norm", 1.0),
-        temperature=tcfg.get("temperature", 0.07),
-        log_every=tcfg.get("log_every", 20),
-        save_every=tcfg.get("save_every", 1000),
-        precision=tcfg.get("precision", "bf16"),
-    )
-    trainer.fit(device)
+    output_dir = Path(tcfg["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config_copy = output_dir / "config.yaml"
+    with open(config_copy, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+
+    with start_mlflow_run(cfg) as mlflow_logger:
+        if getattr(mlflow_logger, "enabled", False):
+            mlflow_logger.log_artifact(config_copy)
+
+        trainer = GVJEPATrainer(
+            model=model,
+            optimizer=optimizer,
+            train_loader=loader,
+            output_dir=tcfg["output_dir"],
+            max_steps=tcfg["max_steps"],
+            scheduler=scheduler,
+            grad_accum_steps=tcfg.get("gradient_accumulation_steps", 1),
+            clip_grad_norm=tcfg.get("clip_grad_norm", 1.0),
+            temperature=tcfg.get("temperature", 0.07),
+            log_every=tcfg.get("log_every", 20),
+            save_every=tcfg.get("save_every", 0),
+            precision=tcfg.get("precision", "bf16"),
+            mlflow_logger=mlflow_logger,
+        )
+        trainer.fit(device)
 
 
 if __name__ == "__main__":

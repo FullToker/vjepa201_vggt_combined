@@ -128,9 +128,10 @@ train:
   max_steps: 2350
 
   clip_grad_norm: 1.0
+  # Loss/lr are logged every 50 micro-batch steps.
   log_every:  50
-  # With max_steps=2350 this writes checkpoints at 750, 1500, 2250, and final.
-  save_every: 750
+  # 0 disables intermediate checkpoints; trainer still writes final.pt.
+  save_every: 0
 
   # Optimizer (AdamW)
   learning_rate: 5.0e-5
@@ -142,3 +143,16 @@ train:
 
   scheduler:   cosine            # "cosine" or "constant"
   temperature: 0.07              # InfoNCE temperature
+
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
+mlflow:
+  enabled: true
+  env_file: .env/mlflow.env
+  # null means use MLFLOW_EXPERIMENT_NAME from env_file.
+  experiment_name: null
+  # null means auto-name from x_encoder_type and train.output_dir.
+  run_name: null
+  log_params: true
+  tags:
+    project: vljepa-fusion-gv
