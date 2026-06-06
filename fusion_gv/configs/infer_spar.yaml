@@ -59,6 +59,8 @@ inference:
   checkpoint: null
 
   mode: auto                    # auto, embedding, select, multichoices
-  batch_size: 1                 # use 1 if rows have variable image counts
+  # SPAR rows have fixed 4-image inputs, so batching improves GPU utilization.
+  # If fusion_gv OOMs, try 4; for vjepa-only, try 16 or 32.
+  batch_size: 8
   device: cuda
   precision: bf16

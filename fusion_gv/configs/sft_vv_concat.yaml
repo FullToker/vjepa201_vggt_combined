@@ -102,7 +102,12 @@ data:
   # S=1 → single image per sample; increase for multi-view / video input
   num_frames: 1
 
-  num_workers: 4
+  # Single H200/B200: keep image decode/preprocess ahead of the GPU.
+  # If CPU or storage saturates, reduce to 8.
+  num_workers: 16
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
@@ -113,11 +118,10 @@ train:
 
   output_dir: ./outputs/sft_vv_concat
 
-  # FusionGV is much heavier than a plain ViT:
-  # VGGT input 518×518 + JEPA input 384×384 per frame.
-  # Use gradient_accumulation to reach an effective batch of 128.
-  batch_size:                   8
-  gradient_accumulation_steps:  16   # effective batch = 8 × 16 = 128
+  # Single H200/B200 starting point. If fusion_gv with multi-view rows OOMs,
+  # reduce batch_size to 8 and raise gradient_accumulation_steps to 16.
+  batch_size:                   16
+  gradient_accumulation_steps:  8    # effective batch = 16 × 8 = 128
 
   # ~3 epochs over a 100 k-sample dataset at effective batch 128:
   #   ceil(100000 / 128) = 782 steps/epoch × 3 ≈ 2350 steps
@@ -125,7 +129,8 @@ train:
 
   clip_grad_norm: 1.0
   log_every:  50
-  save_every: 500
+  # With max_steps=2350 this writes checkpoints at 750, 1500, 2250, and final.
+  save_every: 750
 
   # Optimizer (AdamW)
   learning_rate: 5.0e-5

@@ -367,15 +367,20 @@ def build_loader_from_config(cfg: dict) -> DataLoader:
         from torch.utils.data import ConcatDataset
         ds = ConcatDataset(datasets)
 
-    return DataLoader(
-        ds,
-        batch_size=cfg["train"]["batch_size"],
-        shuffle=True,
-        num_workers=dcfg.get("num_workers", 4),
-        pin_memory=True,
-        collate_fn=gvjepa_collate,
-        drop_last=True,
-    )
+    num_workers = dcfg.get("num_workers", 4)
+    loader_kwargs = {
+        "batch_size": cfg["train"]["batch_size"],
+        "shuffle": True,
+        "num_workers": num_workers,
+        "pin_memory": dcfg.get("pin_memory", True),
+        "collate_fn": gvjepa_collate,
+        "drop_last": True,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = dcfg.get("persistent_workers", True)
+        loader_kwargs["prefetch_factor"] = dcfg.get("prefetch_factor", 4)
+
+    return DataLoader(ds, **loader_kwargs)
 
 
 def build_optimizer_and_scheduler_from_config(
