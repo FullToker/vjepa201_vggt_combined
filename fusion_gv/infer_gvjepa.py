@@ -24,7 +24,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
 import torch
 import torch.nn.functional as F
 import yaml
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from fusion_gv.gvjepa_trainer import build_model_from_config
@@ -159,19 +160,31 @@ def _target(row: Dict[str, Any], candidates: Sequence[str]) -> tuple[str | None,
     return None, None
 
 
-def _batched(rows: List[Dict[str, Any]], batch_size: int) -> Iterable[List[Dict[str, Any]]]:
-    for i in range(0, len(rows), batch_size):
-        yield rows[i : i + batch_size]
+class _InferenceDataset(Dataset):
+    def __init__(self, rows: List[Dict[str, Any]], input_root: str | Path | None) -> None:
+        self.rows = rows
+        self.input_root = input_root
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        row = self.rows[idx]
+        imgs_v, imgs_j = preprocess(_image_paths(row, self.input_root))
+        return {
+            "row": row,
+            "images_vggt": imgs_v,
+            "images_jepa": imgs_j,
+            "query": row.get("query", ""),
+        }
 
 
-def _collate_rows(
-    rows: List[Dict[str, Any]],
-    input_root: str | Path | None,
-) -> tuple[torch.Tensor, torch.Tensor, List[str]]:
-    vggt_list, jepa_list, queries = [], [], []
+def _infer_collate(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    vggt_list, jepa_list, queries, rows = [], [], [], []
     expected_s = None
-    for row in rows:
-        imgs_v, imgs_j = preprocess(_image_paths(row, input_root))
+    for item in items:
+        imgs_v = item["images_vggt"]
+        imgs_j = item["images_jepa"]
         s = imgs_v.shape[1]
         if expected_s is None:
             expected_s = s
@@ -182,11 +195,15 @@ def _collate_rows(
             )
         vggt_list.append(imgs_v)
         jepa_list.append(imgs_j)
-        queries.append(row.get("query", ""))
+        queries.append(item["query"])
+        rows.append(item["row"])
 
-    images_vggt = torch.cat(vggt_list, dim=0)
-    images_jepa = torch.cat([j.unsqueeze(0) for j in jepa_list], dim=0).flatten(0, 1)
-    return images_vggt, images_jepa, queries
+    return {
+        "rows": rows,
+        "images_vggt": torch.cat(vggt_list, dim=0),
+        "images_jepa": torch.cat([j.unsqueeze(0) for j in jepa_list], dim=0).flatten(0, 1),
+        "queries": queries,
+    }
 
 
 def _score_candidate_batch(
@@ -247,6 +264,9 @@ def main() -> None:
     parser.add_argument("--input-root", default=None, help="Root prepended to relative image paths")
     parser.add_argument("--device", default=None, help="cuda or cpu")
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--prefetch-factor", type=int, default=None)
+    parser.add_argument("--no-pin-memory", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "bf16", "fp16"), default=None)
     parser.add_argument("--mode", choices=("auto", "embedding", "select", "multichoices"), default=None)
     parser.add_argument("--x-encoder-type", choices=("fusion_gv", "vjepa"), default=None)
@@ -277,9 +297,19 @@ def main() -> None:
     metrics_output = Path(args.metrics_output or icfg.get("metrics_output", "./outputs/inference/metrics.json"))
     input_root = args.input_root if args.input_root is not None else icfg.get("input_root")
     batch_size = args.batch_size or int(icfg.get("batch_size", 1))
+    num_workers = args.num_workers
+    if num_workers is None:
+        num_workers = int(icfg.get("num_workers", cfg.get("data", {}).get("num_workers", 16)))
+    prefetch_factor = args.prefetch_factor
+    if prefetch_factor is None:
+        prefetch_factor = int(icfg.get("prefetch_factor", cfg.get("data", {}).get("prefetch_factor", 4)))
     mode = args.mode or icfg.get("mode", "auto")
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
+    if num_workers < 0:
+        raise ValueError("num_workers must be >= 0")
+    if prefetch_factor <= 0:
+        raise ValueError("prefetch_factor must be > 0")
 
     precision = args.precision or icfg.get("precision") or cfg.get("train", {}).get("precision", "bf16")
     if precision not in {"fp32", "bf16", "fp16"}:
@@ -297,6 +327,22 @@ def main() -> None:
     model.to(device).eval()
 
     rows = _read_jsonl(input_jsonl)
+    dataset = _InferenceDataset(rows, input_root)
+    pin_memory = device.type == "cuda" and not args.no_pin_memory
+    loader_kwargs: Dict[str, Any] = {
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "collate_fn": _infer_collate,
+    }
+    if num_workers > 0:
+        loader_kwargs.update({
+            "prefetch_factor": prefetch_factor,
+            "persistent_workers": True,
+        })
+    loader = DataLoader(dataset, **loader_kwargs)
+
     if not args.metrics_only:
         output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     metrics_output.parent.mkdir(parents=True, exist_ok=True)
@@ -309,17 +355,18 @@ def main() -> None:
     out_f = None if args.metrics_only else open(output_jsonl, "w", encoding="utf-8")
     try:
         with torch.no_grad():
-            pbar_total = (len(rows) + batch_size - 1) // batch_size
-            for batch in tqdm(_batched(rows, batch_size), total=pbar_total, desc="gvjepa-infer"):
-                images_vggt, images_jepa, queries = _collate_rows(batch, input_root)
-                images_vggt = images_vggt.to(device, non_blocking=True)
-                images_jepa = images_jepa.to(device, non_blocking=True)
+            pbar_total = (len(dataset) + batch_size - 1) // batch_size
+            for batch in tqdm(loader, total=pbar_total, desc="gvjepa-infer"):
+                rows_batch = batch["rows"]
+                images_vggt = batch["images_vggt"].to(device, non_blocking=pin_memory)
+                images_jepa = batch["images_jepa"].to(device, non_blocking=pin_memory)
+                queries = batch["queries"]
 
                 with torch.autocast(device_type=device.type, dtype=dtype, enabled=autocast_enabled):
                     pred_embeddings = model.predict_embedding(images_vggt, images_jepa, queries)
 
-                batch_candidates = [_candidates(row) for row in batch]
-                batch_targets = [_target(row, candidates) for row, candidates in zip(batch, batch_candidates)]
+                batch_candidates = [_candidates(row) for row in rows_batch]
+                batch_targets = [_target(row, candidates) for row, candidates in zip(rows_batch, batch_candidates)]
                 batch_should_score = [
                     mode in {"select", "multichoices"} or (mode == "auto" and candidates)
                     for candidates in batch_candidates
@@ -337,7 +384,7 @@ def main() -> None:
                 )
 
                 for row, candidates, target_info, should_score, score_result in zip(
-                    batch, batch_candidates, batch_targets, batch_should_score, batch_score_results
+                    rows_batch, batch_candidates, batch_targets, batch_should_score, batch_score_results
                 ):
                     total += 1
                     target_text, target_index = target_info
@@ -396,6 +443,10 @@ def main() -> None:
         "input_jsonl": str(input_jsonl),
         "output_jsonl": None if args.metrics_only else str(output_jsonl),
         "metrics_only": args.metrics_only,
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "prefetch_factor": prefetch_factor if num_workers > 0 else None,
+        "pin_memory": pin_memory,
     }
     with open(metrics_output, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
