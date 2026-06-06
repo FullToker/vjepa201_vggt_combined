@@ -91,7 +91,7 @@ model:
 # ── Dataset ───────────────────────────────────────────────────────────────────
 data:
   train_manifests:
-    - ./data/train.jsonl
+    - ./data/spar_trian.jsonl
     # Additional manifests can be listed here; they are concatenated.
     # Each JSONL row format:
     #   {"images": ["frame1.jpg", ...], "query": "...", "target": "..."}
