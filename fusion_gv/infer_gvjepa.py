@@ -189,26 +189,52 @@ def _collate_rows(
     return images_vggt, images_jepa, queries
 
 
-def _score_candidates(
+def _score_candidate_batch(
     model,
-    pred_embedding: torch.Tensor,
-    candidates: List[str],
+    pred_embeddings: torch.Tensor,
+    candidates_by_row: List[List[str]],
     device: torch.device,
-) -> tuple[int, List[Dict[str, Any]]]:
-    target_emb = model.encode_target(candidates, device)
-    pred = F.normalize(pred_embedding.float().unsqueeze(0), dim=-1)
+    include_scores: bool,
+) -> List[tuple[int, List[Dict[str, Any]]] | None]:
+    flat_candidates: List[str] = []
+    spans: List[tuple[int, int] | None] = []
+    for candidates in candidates_by_row:
+        if not candidates:
+            spans.append(None)
+            continue
+        start = len(flat_candidates)
+        flat_candidates.extend(candidates)
+        spans.append((start, len(flat_candidates)))
+
+    if not flat_candidates:
+        return [None for _ in candidates_by_row]
+
+    target_emb = model.encode_target(flat_candidates, device)
+    pred = F.normalize(pred_embeddings.float(), dim=-1)
     target = F.normalize(target_emb.float(), dim=-1)
-    sims = (pred @ target.T).squeeze(0)
-    order = torch.argsort(sims, descending=True).tolist()
-    scores = [
-        {
-            "index": int(i),
-            "candidate": candidates[i],
-            "score": float(sims[i].detach().cpu()),
-        }
-        for i in order
-    ]
-    return int(order[0]), scores
+
+    results: List[tuple[int, List[Dict[str, Any]]] | None] = []
+    for row_idx, span in enumerate(spans):
+        if span is None:
+            results.append(None)
+            continue
+        start, end = span
+        row_candidates = candidates_by_row[row_idx]
+        sims = (pred[row_idx].unsqueeze(0) @ target[start:end].T).squeeze(0)
+        order = torch.argsort(sims, descending=True).tolist()
+        if include_scores:
+            scores = [
+                {
+                    "index": int(i),
+                    "candidate": row_candidates[i],
+                    "score": float(sims[i].detach().cpu()),
+                }
+                for i in order
+            ]
+        else:
+            scores = []
+        results.append((int(order[0]), scores))
+    return results
 
 
 def main() -> None:
@@ -225,6 +251,16 @@ def main() -> None:
     parser.add_argument("--mode", choices=("auto", "embedding", "select", "multichoices"), default=None)
     parser.add_argument("--x-encoder-type", choices=("fusion_gv", "vjepa"), default=None)
     parser.add_argument("--x-encoder-output-dim", type=int, default=None)
+    parser.add_argument(
+        "--metrics-only",
+        action="store_true",
+        help="Only compute aggregate metrics; do not write per-row predictions.",
+    )
+    parser.add_argument(
+        "--write-scores",
+        action="store_true",
+        help="When writing predictions, include full per-candidate score lists.",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -261,7 +297,8 @@ def main() -> None:
     model.to(device).eval()
 
     rows = _read_jsonl(input_jsonl)
-    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    if not args.metrics_only:
+        output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     metrics_output.parent.mkdir(parents=True, exist_ok=True)
 
     total = 0
@@ -269,52 +306,84 @@ def main() -> None:
     correct = 0
     autocast_enabled = dtype is not None and device.type == "cuda"
 
-    with open(output_jsonl, "w", encoding="utf-8") as out_f, torch.no_grad():
-        pbar_total = (len(rows) + batch_size - 1) // batch_size
-        for batch in tqdm(_batched(rows, batch_size), total=pbar_total, desc="gvjepa-infer"):
-            images_vggt, images_jepa, queries = _collate_rows(batch, input_root)
-            images_vggt = images_vggt.to(device, non_blocking=True)
-            images_jepa = images_jepa.to(device, non_blocking=True)
+    out_f = None if args.metrics_only else open(output_jsonl, "w", encoding="utf-8")
+    try:
+        with torch.no_grad():
+            pbar_total = (len(rows) + batch_size - 1) // batch_size
+            for batch in tqdm(_batched(rows, batch_size), total=pbar_total, desc="gvjepa-infer"):
+                images_vggt, images_jepa, queries = _collate_rows(batch, input_root)
+                images_vggt = images_vggt.to(device, non_blocking=True)
+                images_jepa = images_jepa.to(device, non_blocking=True)
 
-            with torch.autocast(device_type=device.type, dtype=dtype, enabled=autocast_enabled):
-                pred_embeddings = model.predict_embedding(images_vggt, images_jepa, queries)
+                with torch.autocast(device_type=device.type, dtype=dtype, enabled=autocast_enabled):
+                    pred_embeddings = model.predict_embedding(images_vggt, images_jepa, queries)
 
-            for row, pred_embedding in zip(batch, pred_embeddings):
-                total += 1
-                candidates = _candidates(row)
-                target_text, target_index = _target(row, candidates)
-                should_score = mode in {"select", "multichoices"} or (mode == "auto" and candidates)
+                batch_candidates = [_candidates(row) for row in batch]
+                batch_targets = [_target(row, candidates) for row, candidates in zip(batch, batch_candidates)]
+                batch_should_score = [
+                    mode in {"select", "multichoices"} or (mode == "auto" and candidates)
+                    for candidates in batch_candidates
+                ]
+                scoring_candidates = [
+                    candidates if should_score else []
+                    for candidates, should_score in zip(batch_candidates, batch_should_score)
+                ]
+                batch_score_results = _score_candidate_batch(
+                    model,
+                    pred_embeddings,
+                    scoring_candidates,
+                    device,
+                    include_scores=(args.write_scores and not args.metrics_only),
+                )
 
-                result: Dict[str, Any] = {
-                    "line": row.get("_line"),
-                    "query": row.get("query", ""),
-                    "images": _raw_image_paths(row),
-                    "checkpoint": str(checkpoint_path),
-                    "pred_embedding": pred_embedding.detach().float().cpu().tolist(),
-                }
-                if step is not None:
-                    result["step"] = step
+                for row, candidates, target_info, should_score, score_result in zip(
+                    batch, batch_candidates, batch_targets, batch_should_score, batch_score_results
+                ):
+                    total += 1
+                    target_text, target_index = target_info
 
-                if should_score:
-                    if not candidates:
-                        raise ValueError(f"Row {row.get('_line', '?')} has no candidates for {mode} mode.")
-                    pred_index, scores = _score_candidates(model, pred_embedding, candidates, device)
-                    pred_text = candidates[pred_index]
-                    result.update({
-                        "candidates": candidates,
-                        "target": target_text,
-                        "target_index": target_index,
-                        "pred_index": pred_index,
-                        "pred": pred_text,
-                        "scores": scores,
-                    })
-                    if target_text is not None:
-                        is_correct = pred_text == target_text
-                        result["correct"] = is_correct
-                        evaluated += 1
-                        correct += int(is_correct)
+                    if should_score:
+                        if not candidates:
+                            raise ValueError(f"Row {row.get('_line', '?')} has no candidates for {mode} mode.")
+                        if score_result is None:
+                            raise RuntimeError("Missing candidate scores for a row that should be scored.")
+                        pred_index, scores = score_result
+                        pred_text = candidates[pred_index]
+                        if target_text is not None:
+                            is_correct = pred_text == target_text
+                            evaluated += 1
+                            correct += int(is_correct)
+                    else:
+                        pred_index = None
+                        pred_text = None
+                        scores = []
+                        is_correct = None
 
-                out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    if out_f is not None:
+                        result: Dict[str, Any] = {
+                            "line": row.get("_line"),
+                            "query": row.get("query", ""),
+                            "images": _raw_image_paths(row),
+                            "checkpoint": str(checkpoint_path),
+                        }
+                        if step is not None:
+                            result["step"] = step
+                        if should_score:
+                            result.update({
+                                "candidates": candidates,
+                                "target": target_text,
+                                "target_index": target_index,
+                                "pred_index": pred_index,
+                                "pred": pred_text,
+                            })
+                            if args.write_scores:
+                                result["scores"] = scores
+                            if target_text is not None:
+                                result["correct"] = is_correct
+                        out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+    finally:
+        if out_f is not None:
+            out_f.close()
 
     metrics = {
         "total": total,
@@ -325,13 +394,17 @@ def main() -> None:
         "step": step,
         "mode": mode,
         "input_jsonl": str(input_jsonl),
-        "output_jsonl": str(output_jsonl),
+        "output_jsonl": None if args.metrics_only else str(output_jsonl),
+        "metrics_only": args.metrics_only,
     }
     with open(metrics_output, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
     acc = "n/a" if metrics["accuracy"] is None else f"{metrics['accuracy']:.6f}"
-    print(f"wrote predictions: {output_jsonl}")
+    if args.metrics_only:
+        print("metrics-only mode: skipped per-row prediction output")
+    else:
+        print(f"wrote predictions: {output_jsonl}")
     print(f"wrote metrics: {metrics_output}")
     print(f"evaluated={evaluated} correct={correct} accuracy={acc}")
 
