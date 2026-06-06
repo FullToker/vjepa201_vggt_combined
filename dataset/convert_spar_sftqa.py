@@ -10,79 +10,48 @@ Default split policy:
   - sentence + fill -> train manifest
   - select          -> eval manifest
 
-Output rows match fusion_gv.gvjepa_trainer.GVJEPADataset:
-
+Train rows:
   {"images": ["...", "...", "...", "..."], "query": "...", "target": "..."}
+
+Eval/select rows:
+  {"images": ["...", "...", "...", "..."], "query": "...", "candidates": [...], "target": "..."}
+
+For select rows, target is converted from the option label (e.g. "A") to the
+corresponding candidate text without the A/B/C/D prefix.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Iterable, Sequence, TextIO
 
 TRAIN_KINDS = ("sentence", "fill")
 EVAL_KINDS = ("select",)
+OPTION_RE = re.compile(r"^\s*([A-Z])\s*[\.)]\s*(.+?)\s*$")
+ANSWER_INSTRUCTION_RE = re.compile(
+    r"^\s*Your answer (?:can|should|must).*?(?:options?\s+)?[A-Z](?:\s*,\s*[A-Z]|\s+or\s+[A-Z]|\s*)*[\.]?\s*$",
+    re.IGNORECASE,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Convert SPAR-7M-RGBD LLaVA-style QA JSONL into FusionGVJEPA manifests."
     )
-    parser.add_argument(
-        "--spar-root",
-        default="./source_data/spar",
-        help="Extracted SPAR root. Default: ./source_data/spar",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="./data",
-        help="Output directory for generated JSONL manifests. Default: ./data",
-    )
-    parser.add_argument(
-        "--train-output",
-        default="spar_sftqa_train.jsonl",
-        help="Train manifest filename under --output-dir.",
-    )
-    parser.add_argument(
-        "--eval-output",
-        default="spar_sftqa_eval.jsonl",
-        help="Eval manifest filename under --output-dir.",
-    )
-    parser.add_argument(
-        "--split",
-        default="train",
-        help="SPAR split to read. Default: train",
-    )
-    parser.add_argument(
-        "--num-frames",
-        type=int,
-        default=4,
-        help="Number of RGB frames per output sample. Default: 4",
-    )
-    parser.add_argument(
-        "--max-train",
-        type=int,
-        default=None,
-        help="Optional max number of train rows for smoke tests.",
-    )
-    parser.add_argument(
-        "--max-eval",
-        type=int,
-        default=None,
-        help="Optional max number of eval rows for smoke tests.",
-    )
-    parser.add_argument(
-        "--no-verify-images",
-        action="store_true",
-        help="Skip checking whether resolved RGB files exist.",
-    )
-    parser.add_argument(
-        "--include-metadata",
-        action="store_true",
-        help="Include source/id/type/qa_kind metadata fields in each output row.",
-    )
+    parser.add_argument("--spar-root", default="./source_data/spar", help="Extracted SPAR root. Default: ./source_data/spar")
+    parser.add_argument("--output-dir", default="./data", help="Output directory for generated JSONL manifests. Default: ./data")
+    parser.add_argument("--train-output", default="spar_sftqa_train.jsonl", help="Train manifest filename under --output-dir.")
+    parser.add_argument("--eval-output", default="spar_sftqa_eval.jsonl", help="Eval manifest filename under --output-dir.")
+    parser.add_argument("--split", default="train", help="SPAR split to read. Default: train")
+    parser.add_argument("--num-frames", type=int, default=4, help="Number of RGB frames per output sample. Default: 4")
+    parser.add_argument("--only", choices=("both", "train", "eval"), default="both", help="Which manifests to generate. Default: both")
+    parser.add_argument("--max-train", type=int, default=None, help="Optional max number of train rows for smoke tests.")
+    parser.add_argument("--max-eval", type=int, default=None, help="Optional max number of eval rows for smoke tests.")
+    parser.add_argument("--no-verify-images", action="store_true", help="Skip checking whether resolved RGB files exist.")
+    parser.add_argument("--include-metadata", action="store_true", help="Include source/id/type/qa_kind metadata fields in each output row.")
     return parser.parse_args()
 
 
@@ -104,6 +73,38 @@ def first_conversation_value(conversations: object, role: str) -> str:
         if isinstance(item, dict) and item.get("from") == role:
             return str(item.get("value", "")).strip()
     return ""
+
+
+def parse_select_query_and_candidates(query: str, target: str) -> tuple[str, list[str], str] | None:
+    """Split select prompt into clean query, candidate texts, and target text."""
+    question_lines: list[str] = []
+    options: dict[str, str] = {}
+
+    for line in query.splitlines():
+        match = OPTION_RE.match(line)
+        if match:
+            label, candidate = match.groups()
+            options[label.upper()] = candidate.strip()
+            continue
+        if ANSWER_INSTRUCTION_RE.match(line):
+            continue
+        question_lines.append(line.rstrip())
+
+    candidates = [text for _, text in sorted(options.items())]
+    clean_query = "\n".join(question_lines).strip()
+    target_clean = target.strip()
+
+    if not clean_query or not candidates:
+        return None
+
+    if len(target_clean) == 1 and target_clean.upper() in options:
+        target_text = options[target_clean.upper()]
+    elif target_clean in candidates:
+        target_text = target_clean
+    else:
+        return None
+
+    return clean_query, candidates, target_text
 
 
 def sample_frames(images: Sequence[str], num_frames: int) -> list[str]:
@@ -175,16 +176,18 @@ def convert_one_file(
                 skipped += 1
                 continue
 
-            row = {"images": images, "query": query, "target": target}
+            if qa_kind == "select":
+                parsed = parse_select_query_and_candidates(query, target)
+                if parsed is None:
+                    skipped += 1
+                    continue
+                query, candidates, target = parsed
+                row = {"images": images, "query": query, "candidates": candidates, "target": target}
+            else:
+                row = {"images": images, "query": query, "target": target}
+
             if include_metadata:
-                row.update(
-                    {
-                        "source": source,
-                        "id": raw.get("id"),
-                        "type": raw.get("type"),
-                        "qa_kind": qa_kind,
-                    }
-                )
+                row.update({"source": source, "id": raw.get("id"), "type": raw.get("type"), "qa_kind": qa_kind})
             out_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             written += 1
             if limit_remaining is not None:
@@ -227,13 +230,7 @@ def convert_group(
             total_written += written
             total_skipped += skipped
 
-    return {
-        "output": str(output_path),
-        "qa_kinds": list(kinds),
-        "files": total_files,
-        "written": total_written,
-        "skipped": total_skipped,
-    }
+    return {"output": str(output_path), "qa_kinds": list(kinds), "files": total_files, "written": total_written, "skipped": total_skipped}
 
 
 def main() -> None:
@@ -244,29 +241,32 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     verify_images = not args.no_verify_images
+    result: dict[str, object] = {}
 
-    train_stats = convert_group(
-        spar_root=spar_root,
-        split=args.split,
-        kinds=TRAIN_KINDS,
-        output_path=output_dir / args.train_output,
-        num_frames=args.num_frames,
-        verify_images=verify_images,
-        include_metadata=args.include_metadata,
-        max_rows=args.max_train,
-    )
-    eval_stats = convert_group(
-        spar_root=spar_root,
-        split=args.split,
-        kinds=EVAL_KINDS,
-        output_path=output_dir / args.eval_output,
-        num_frames=args.num_frames,
-        verify_images=verify_images,
-        include_metadata=args.include_metadata,
-        max_rows=args.max_eval,
-    )
+    if args.only in ("both", "train"):
+        result["train"] = convert_group(
+            spar_root=spar_root,
+            split=args.split,
+            kinds=TRAIN_KINDS,
+            output_path=output_dir / args.train_output,
+            num_frames=args.num_frames,
+            verify_images=verify_images,
+            include_metadata=args.include_metadata,
+            max_rows=args.max_train,
+        )
+    if args.only in ("both", "eval"):
+        result["eval"] = convert_group(
+            spar_root=spar_root,
+            split=args.split,
+            kinds=EVAL_KINDS,
+            output_path=output_dir / args.eval_output,
+            num_frames=args.num_frames,
+            verify_images=verify_images,
+            include_metadata=args.include_metadata,
+            max_rows=args.max_eval,
+        )
 
-    print(json.dumps({"train": train_stats, "eval": eval_stats}, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
