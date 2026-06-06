@@ -11,9 +11,9 @@ both encoder inputs in-memory — avoids double disk I/O and double JPEG decode.
 
 Public API
 ----------
-preprocess(images)  →  (images_vggt, images_jepa)
-    images_vggt : (1, S, 3, 518, 518)   float32, [0, 1]
-    images_jepa : (S,  3, 1, 384, 384)  float32, ImageNet-normalised
+preprocess(images)  ->  (images_vggt, images_jepa)
+    images_vggt : (1, S, 3, 518, 518)   float32, [0, 1], or None
+    images_jepa : (S,  3, 1, 384, 384)  float32, ImageNet-normalised, or None
 """
 
 from typing import List, Union
@@ -89,25 +89,35 @@ def _to_jepa(t: torch.Tensor) -> torch.Tensor:
 
 def preprocess(
     images: List[Union[str, Image.Image]],
-) -> tuple[torch.Tensor, torch.Tensor]:
+    *,
+    need_vggt: bool = True,
+    need_jepa: bool = True,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """
-    Decode each image once and derive both encoder inputs in-memory.
+    Decode each image once and derive requested encoder inputs in-memory.
 
     Args:
         images: list of S file paths or PIL Images
+        need_vggt: build the VGGT input tensor
+        need_jepa: build the V-JEPA input tensor
 
     Returns:
-        images_vggt : (1, S, 3, 518, 518)  float32, [0, 1]
-        images_jepa : (S,  3, 1, 384, 384) float32, ImageNet-normalised
+        images_vggt : (1, S, 3, 518, 518)  float32, [0, 1], or None
+        images_jepa : (S,  3, 1, 384, 384) float32, ImageNet-normalised, or None
     """
+    if not need_vggt and not need_jepa:
+        raise ValueError("At least one of need_vggt or need_jepa must be true.")
+
     vggt_frames, jepa_frames = [], []
 
     for src in images:
-        raw = _decode(src)              # (3, H, W)  — one decode per image
-        vggt_frames.append(_to_vggt(raw))   # (3, 518, 518)
-        jepa_frames.append(_to_jepa(raw))   # (3, 1, 384, 384)
+        raw = _decode(src)              # (3, H, W)  - one decode per image
+        if need_vggt:
+            vggt_frames.append(_to_vggt(raw))   # (3, 518, 518)
+        if need_jepa:
+            jepa_frames.append(_to_jepa(raw))   # (3, 1, 384, 384)
 
-    images_vggt = torch.stack(vggt_frames).unsqueeze(0)  # (1, S, 3, 518, 518)
-    images_jepa = torch.stack(jepa_frames)               # (S,  3, 1, 384, 384)
+    images_vggt = torch.stack(vggt_frames).unsqueeze(0) if need_vggt else None
+    images_jepa = torch.stack(jepa_frames) if need_jepa else None
 
     return images_vggt, images_jepa

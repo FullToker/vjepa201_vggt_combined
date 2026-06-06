@@ -161,16 +161,26 @@ def _target(row: Dict[str, Any], candidates: Sequence[str]) -> tuple[str | None,
 
 
 class _InferenceDataset(Dataset):
-    def __init__(self, rows: List[Dict[str, Any]], input_root: str | Path | None) -> None:
+    def __init__(
+        self,
+        rows: List[Dict[str, Any]],
+        input_root: str | Path | None,
+        need_vggt: bool,
+    ) -> None:
         self.rows = rows
         self.input_root = input_root
+        self.need_vggt = need_vggt
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self.rows[idx]
-        imgs_v, imgs_j = preprocess(_image_paths(row, self.input_root))
+        imgs_v, imgs_j = preprocess(
+            _image_paths(row, self.input_root),
+            need_vggt=self.need_vggt,
+            need_jepa=True,
+        )
         return {
             "row": row,
             "images_vggt": imgs_v,
@@ -185,7 +195,9 @@ def _infer_collate(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     for item in items:
         imgs_v = item["images_vggt"]
         imgs_j = item["images_jepa"]
-        s = imgs_v.shape[1]
+        if imgs_j is None:
+            raise ValueError("Inference requires V-JEPA inputs.")
+        s = imgs_v.shape[1] if imgs_v is not None else imgs_j.shape[0]
         if expected_s is None:
             expected_s = s
         elif s != expected_s:
@@ -193,14 +205,20 @@ def _infer_collate(items: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "All samples in one inference batch must have the same number of images. "
                 f"Got {expected_s} and {s}; set --batch-size 1 for variable-length rows."
             )
-        vggt_list.append(imgs_v)
+        if imgs_v is not None:
+            vggt_list.append(imgs_v)
         jepa_list.append(imgs_j)
         queries.append(item["query"])
         rows.append(item["row"])
 
+    if vggt_list:
+        images_vggt = torch.cat(vggt_list, dim=0)
+    else:
+        images_vggt = torch.empty(len(items), expected_s or 0, 0)
+
     return {
         "rows": rows,
-        "images_vggt": torch.cat(vggt_list, dim=0),
+        "images_vggt": images_vggt,
         "images_jepa": torch.cat([j.unsqueeze(0) for j in jepa_list], dim=0).flatten(0, 1),
         "queries": queries,
     }
@@ -326,8 +344,11 @@ def main() -> None:
     step = _load_checkpoint(model, checkpoint_path)
     model.to(device).eval()
 
+    x_encoder_type = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv")
+    need_vggt = x_encoder_type == "fusion_gv"
+
     rows = _read_jsonl(input_jsonl)
-    dataset = _InferenceDataset(rows, input_root)
+    dataset = _InferenceDataset(rows, input_root, need_vggt=need_vggt)
     pin_memory = device.type == "cuda" and not args.no_pin_memory
     loader_kwargs: Dict[str, Any] = {
         "batch_size": batch_size,
@@ -447,6 +468,8 @@ def main() -> None:
         "num_workers": num_workers,
         "prefetch_factor": prefetch_factor if num_workers > 0 else None,
         "pin_memory": pin_memory,
+        "x_encoder_type": x_encoder_type,
+        "need_vggt_preprocess": need_vggt,
     }
     with open(metrics_output, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
