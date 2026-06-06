@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# FusionGVJEPA  ·  SFT stage  ·  concat fusion  (vggt + vjepa2.1)
+# FusionGVJEPA  ·  SFT stage  ·  V-JEPA-only X-encoder
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # Architecture recap:
@@ -25,14 +25,14 @@
 #                                                    ← trained at lr × 0.05 →
 #
 # Run:
-#   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/sft_vv_concat.yaml
+#   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/sft_vjepa.yaml
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-# ── Frozen visual encoders + concat fusion ────────────────────────────────────
+# ── Frozen V-JEPA visual encoder ─────────────────────────────────────────────
 fusion:
-  # X-encoder mode: "fusion_gv" = current VGGT + V-JEPA concat, "vjepa" = V-JEPA only
-  x_encoder_type: fusion_gv
+  # X-encoder mode: "fusion_gv" = VGGT + V-JEPA concat, "vjepa" = V-JEPA only
+  x_encoder_type: vjepa
   # Optional explicit visual feature dim. Defaults: fusion_gv=3072, vjepa=1024.
   x_encoder_output_dim: null
 
@@ -116,10 +116,10 @@ train:
   device:  cuda
   precision: bf16                # "bf16" or "fp16"
 
-  output_dir: ./outputs/sft_vv_concat
+  output_dir: ./outputs/sft_vjepa
 
-  # Single H200/B200 starting point. If fusion_gv with multi-view rows OOMs,
-  # reduce batch_size to 8 and raise gradient_accumulation_steps to 16.
+  # Single H200/B200 starting point. V-JEPA-only is lighter than fusion_gv;
+  # if GPU memory is still underused, try batch_size 24/32 and reduce grad accumulation.
   batch_size:                   16
   gradient_accumulation_steps:  8    # effective batch = 16 × 8 = 128
 
@@ -156,3 +156,4 @@ mlflow:
   log_params: true
   tags:
     project: vljepa-fusion-gv
+    variant: vjepa-only
