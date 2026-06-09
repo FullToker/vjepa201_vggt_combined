@@ -120,12 +120,13 @@ train:
 
   # Single H200/B200 starting point. If fusion_gv with multi-view rows OOMs,
   # reduce batch_size to 8 and raise gradient_accumulation_steps to 16.
-  batch_size:                   16
-  gradient_accumulation_steps:  8    # effective batch = 16 × 8 = 128
+  batch_size:                   32
+  gradient_accumulation_steps:  4    # effective batch = 32 × 4 = 128
 
-  # ~3 epochs over a 100 k-sample dataset at effective batch 128:
-  #   ceil(100000 / 128) = 782 steps/epoch × 3 ≈ 2350 steps
-  max_steps: 2350
+  # 50% of 11,657,660 rows at batch_size=32:
+  #   ceil(11,657,660 * 0.5 / 32) = 182,151 micro-batches
+  #   effective batch = 32 x 4 = 128; optimizer updates ≈ 45,538
+  max_steps: 182151
 
   clip_grad_norm: 1.0
   # Loss/lr are logged every 50 micro-batch steps.

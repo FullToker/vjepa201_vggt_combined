@@ -120,12 +120,13 @@ train:
 
   # Single H200/B200 starting point. V-JEPA-only is lighter than fusion_gv;
   # if GPU memory is still underused, try batch_size 24/32 and reduce grad accumulation.
-  batch_size:                   16
-  gradient_accumulation_steps:  8    # effective batch = 16 × 8 = 128
+  batch_size:                   128
+  gradient_accumulation_steps:  1    # effective batch = 128 × 1 = 128
 
-  # ~3 epochs over a 100 k-sample dataset at effective batch 128:
-  #   ceil(100000 / 128) = 782 steps/epoch × 3 ≈ 2350 steps
-  max_steps: 2350
+  # 50% of 11,657,660 rows at batch_size=128:
+  #   ceil(11,657,660 * 0.5 / 128) = 45,538 micro-batches
+  #   effective batch = 128 x 1 = 128; optimizer updates ≈ 45,538
+  max_steps: 45538
 
   clip_grad_norm: 1.0
   # Loss/lr are logged every 50 micro-batch steps.
