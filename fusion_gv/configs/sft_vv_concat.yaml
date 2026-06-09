@@ -116,7 +116,7 @@ train:
   device:  cuda
   precision: bf16                # "bf16" or "fp16"
 
-  output_dir: ./outputs/sft_vv_concat
+  output_dir: ./outputs/sft_vv_concat_halfdata
 
   # Single H200/B200 starting point. If fusion_gv with multi-view rows OOMs,
   # reduce batch_size to 8 and raise gradient_accumulation_steps to 16.
