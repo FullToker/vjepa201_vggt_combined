@@ -3,32 +3,42 @@
 # Images (ScanNet/HM3D/MP3D) require separate data-use agreements — see README.
 #
 # Usage:
-#   bash dataset/download_embodiedscan.sh [OUTPUT_DIR]
+#   HF_TOKEN=hf_xxx bash dataset/download_embodiedscan.sh [OUTPUT_DIR]
+#   OR: huggingface-cli login first, then run without HF_TOKEN.
 #
-# Verify filenames at:
-#   https://huggingface.co/datasets/OpenRobotLab/EmbodiedScan/tree/main
+# Dataset page: https://huggingface.co/datasets/OpenRobotLab/EmbodiedScan
 set -euo pipefail
 
-REPO_ID="OpenRobotLab/EmbodiedScan"
+REPO_ID="cjfcsjt/embodiedscan"
 OUTPUT_DIR="${1:-./source_data/embodiedscan}"
 
-if ! command -v wget >/dev/null 2>&1; then
-  echo "Missing 'wget'. Install: sudo apt install wget" >&2
+if ! command -v hf >/dev/null 2>&1; then
+  echo "Missing 'hf'. Install: pip install huggingface_hub[cli]" >&2
   exit 1
 fi
 
+
 mkdir -p "$OUTPUT_DIR"
 
-BASE_URL="https://huggingface.co/datasets/${REPO_ID}/resolve/main"
-
 FILES=(
-  "embodiedscan_infos_train_full.pkl"
-  "embodiedscan_infos_val_full.pkl"
+  "embodiedscan.zip"
 )
+
+# Pass token via env if set; otherwise huggingface-cli uses cached login.
+TOKEN_ARG=()
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  TOKEN_ARG=(--token "$HF_TOKEN")
+fi
 
 echo "Downloading EmbodiedScan PKLs to: ${OUTPUT_DIR}"
 for f in "${FILES[@]}"; do
-  wget -c "${BASE_URL}/${f}" -P "$OUTPUT_DIR"
+  hf download "$REPO_ID" "$f" \
+    --repo-type dataset \
+    --local-dir "$OUTPUT_DIR" \
+    "${TOKEN_ARG[@]}"
 done
 
-echo "Done. Images (ScanNet/HM3D/MP3D) need separate download per their data agreements."
+echo "Extracting embodiedscan.zip..."
+python3 -m zipfile -e "${OUTPUT_DIR}/embodiedscan.zip" "${OUTPUT_DIR}"
+rm "${OUTPUT_DIR}/embodiedscan.zip"
+echo "Done. Extracted to: ${OUTPUT_DIR}"
