@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Convert EmbodiedScan PKL + VG JSON → FusionGVJEPA grounding JSONL.
+
+Directory layout (--data-root):
+  <data_root>/
+    embodiedscan/embodiedscan/
+      embodiedscan_infos_{train,val,test}.pkl
+      embodiedscan_{train,val,test}_vg.json
+    scannet/
+      posed_images/
+        sceneXXXX_XX/
+          XXXXX.jpg
+
+Each output row:
+  {
+    "images":    ["abs/path/view0.jpg", ...],   # max_views visible views
+    "query":     "the board beside the door",
+    "target":    "the board beside the door",
+    "task_type": "grounding",
+    "boxes":     [[x1,y1,x2,y2]|null, ...],    # per-view, 518x518 pixel space
+    "source":    "embodiedscan",
+  }
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import pickle
+from pathlib import Path
+
+import numpy as np
+
+_VGGT_SIZE = 518
+
+
+def bbox7_to_corners(bbox7: list | np.ndarray) -> np.ndarray:
+    """[cx,cy,cz, l,w,h, yaw] → (8,3) world-frame corners."""
+    cx, cy, cz = float(bbox7[0]), float(bbox7[1]), float(bbox7[2])
+    l, w, h    = float(bbox7[3]), float(bbox7[4]), float(bbox7[5])
+    yaw        = float(bbox7[6])
+
+    signs = np.array([
+        [-1,-1,-1], [-1,-1, 1], [-1, 1,-1], [-1, 1, 1],
+        [ 1,-1,-1], [ 1,-1, 1], [ 1, 1,-1], [ 1, 1, 1],
+    ], dtype=np.float64)
+    local = signs * np.array([l / 2, w / 2, h / 2])
+
+    c, s = math.cos(yaw), math.sin(yaw)
+    Rz = np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
+    return local @ Rz.T + np.array([cx, cy, cz])
+
+
+def project_box(
+    corners_w: np.ndarray,
+    cam2global: np.ndarray,
+    cam2img: np.ndarray,
+    orig_hw: tuple[int, int],
+) -> list[float] | None:
+    """Project 8 world corners → [x1,y1,x2,y2] in 518×518 space, or None.
+
+    cam2global: (4,4) camera-to-world (mmdet3d convention).
+    cam2img:    (4,4) or (3,3) intrinsic — only top-left 3×3 used.
+    """
+    H, W = orig_hw
+    R = cam2global[:3, :3]
+    t = cam2global[:3, 3]
+    cam_pts = (corners_w - t) @ R          # (8,3)  [R.T via right-multiply]
+
+    valid = cam_pts[:, 2] > 0
+    if not valid.any():
+        return None
+
+    pts = cam_pts[valid]                   # (K,3)
+    K   = cam2img[:3, :3]
+    uvw = pts @ K.T
+    u   = uvw[:, 0] / uvw[:, 2]
+    v   = uvw[:, 1] / uvw[:, 2]
+
+    scale      = _VGGT_SIZE / min(H, W)
+    new_H      = round(H * scale)
+    new_W      = round(W * scale)
+    u          = u * scale - (new_W - _VGGT_SIZE) / 2.0
+    v          = v * scale - (new_H - _VGGT_SIZE) / 2.0
+    u          = np.clip(u, 0., _VGGT_SIZE)
+    v          = np.clip(v, 0., _VGGT_SIZE)
+
+    x1, y1, x2, y2 = float(u.min()), float(v.min()), float(u.max()), float(v.max())
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def infer_hw(cam2img: np.ndarray) -> tuple[int, int]:
+    """Estimate (H, W) from principal point (cx, cy) in cam2img."""
+    cx, cy = float(cam2img[0, 2]), float(cam2img[1, 2])
+    return round(cy * 2), round(cx * 2)
+
+
+def convert(
+    split: str,
+    data_root: str | Path,
+    output_jsonl: str | Path,
+    max_views: int = 4,
+) -> int:
+    data_root    = Path(data_root)
+    ann_dir      = data_root / "embodiedscan" / "embodiedscan"
+    output_jsonl = Path(output_jsonl)
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load PKL and build scan_id → sample lookup
+    pkl_path = ann_dir / f"embodiedscan_infos_{split}.pkl"
+    data     = pickle.load(open(pkl_path, "rb"))
+    scan2sample: dict[str, dict] = {s["sample_idx"]: s for s in data["data_list"]}
+
+    # Load VG JSON
+    vg_path   = ann_dir / f"embodiedscan_{split}_vg.json"
+    vg_entries = json.load(open(vg_path))
+
+    rows_written      = 0
+    skipped_no_sample = 0
+    skipped_no_inst   = 0
+    skipped_invisible = 0
+
+    with open(output_jsonl, "w") as out:
+        for entry in vg_entries:
+            scan_id   = entry["scan_id"]      # e.g. "scannet/scene0191_00"
+            target_id = entry["target_id"]
+            text      = entry["text"]
+
+            sample = scan2sample.get(scan_id)
+            if sample is None:
+                skipped_no_sample += 1
+                continue
+
+            # Find target instance by bbox_id
+            inst = next(
+                (i for i in sample["instances"] if i["bbox_id"] == target_id),
+                None,
+            )
+            if inst is None:
+                skipped_no_inst += 1
+                continue
+
+            corners_w = bbox7_to_corners(inst["bbox_3d"])
+            cam2img   = np.asarray(sample["cam2img"], dtype=np.float64)
+            orig_hw   = infer_hw(cam2img)
+
+            # Prefer views where target is visible; fall back to all views
+            all_views = sample["images"]
+            visible   = [
+                v for v in all_views
+                if target_id in v.get("visible_instance_ids", [])
+            ]
+            selected = (visible if visible else all_views)[:max_views]
+
+            images: list[str]               = []
+            boxes:  list[list[float] | None] = []
+
+            for v in selected:
+                cam2global = np.asarray(v["cam2global"], dtype=np.float64)
+                box        = project_box(corners_w, cam2global, cam2img, orig_hw)
+                images.append(str(data_root / v["img_path"]))
+                boxes.append(box)
+
+            if not any(b is not None for b in boxes):
+                skipped_invisible += 1
+                continue
+
+            out.write(json.dumps({
+                "images":    images,
+                "query":     text,
+                "target":    text,
+                "task_type": "grounding",
+                "boxes":     boxes,
+                "source":    "embodiedscan",
+            }) + "\n")
+            rows_written += 1
+
+    print(
+        f"[{split}] wrote {rows_written} rows  "
+        f"(skipped: {skipped_no_sample} no-sample, "
+        f"{skipped_no_inst} no-inst, {skipped_invisible} invisible)"
+    )
+    return rows_written
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Convert EmbodiedScan PKL+VG → FusionGVJEPA grounding JSONL."
+    )
+    p.add_argument("--split",     required=True, choices=["train", "val", "test"],
+                   help="Dataset split")
+    p.add_argument("--data-root", required=True,
+                   help="Parent dir containing embodiedscan/ and scannet/")
+    p.add_argument("--output",    required=True, help="Output .jsonl path")
+    p.add_argument("--max-views", type=int, default=4,
+                   help="Max camera views per grounding entry (default: 4)")
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    convert(args.split, args.data_root, args.output, args.max_views)
