@@ -55,6 +55,7 @@ import torch
 import torch.nn as nn
 
 from fusion_gv.config import FusionConfig
+from fusion_gv.grounding_head import GroundingHead
 from fusion_gv.model import build_x_encoder
 
 
@@ -166,6 +167,14 @@ class GVJEPAConfig:
     # All AutoModel / AutoTokenizer downloads land here (mirrors ./ckpts layout)
     hf_cache_dir: str = "./ckpts"
 
+    # Grounding head (optional, for EmbodiedScan bbox supervision)
+    grounding_enabled: bool = False
+    grounding_num_layers: int = 3
+    grounding_num_heads: int = 8
+    grounding_ffn_mult: int = 4
+    grounding_dropout: float = 0.0
+    grounding_patch_grid: int = 37   # 518 / 14 = 37
+
 
 # ── Model ──────────────────────────────────────────────────────────────────────
 
@@ -260,20 +269,35 @@ class FusionGVJEPA(nn.Module):
             raise ValueError(f"Y-Encoder '{config.y_encoder_name}' has no hidden_size in config.")
         self.y_proj = nn.Linear(y_hidden, config.shared_embed_dim)
 
+        # ── Grounding head (optional) ─────────────────────────────────────────
+        self.grounding_head: GroundingHead | None = None
+        if config.grounding_enabled:
+            self.grounding_head = GroundingHead(
+                spatial_dim=D_fused,
+                hidden_dim=h,
+                num_layers=config.grounding_num_layers,
+                num_heads=config.grounding_num_heads,
+                ffn_mult=config.grounding_ffn_mult,
+                dropout=config.grounding_dropout,
+                patch_grid=config.grounding_patch_grid,
+            )
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _pool_visual(
         self,
         images_vggt: torch.Tensor,
         images_jepa: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run FusionGV and spatially mean-pool the chosen level.
 
-        Returns: (B, S, D_f)
+        Returns:
+            pooled:  (B, S, D_f)       mean-pooled over patches
+            spatial: (B, S, P, D_f)    raw patch features before pooling
         """
         feats = self.x_encoder(images_vggt, images_jepa)  # 4 × (B, S, P, D_f)
         feat = feats[self.config.use_fusion_level]         # (B, S, P, D_f)
-        return feat.mean(dim=2)                            # (B, S, D_f)
+        return feat.mean(dim=2), feat                      # (B,S,D_f), (B,S,P,D_f)
 
     def _tokenize(self, tokenizer, texts: list[str], max_length: int, device: torch.device):
         out = tokenizer(
@@ -299,6 +323,49 @@ class FusionGVJEPA(nn.Module):
         pooled = (hs * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1)
         return self.y_proj(pooled)                          # (B, D_shared)
 
+    def _run_predictor(
+        self,
+        images_vggt: torch.Tensor,
+        images_jepa: torch.Tensor,
+        queries: list[str],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Shared predictor forward used by both InfoNCE and grounding paths.
+
+        Returns:
+            x_vis:   (B, S, h)      predictor output over visual positions (summary)
+            pooled:  (B, h)         query-pooled embedding (for pred_proj)
+            spatial: (B, S, P, D_f) raw spatial features before pooling
+        """
+        device = images_vggt.device
+        B = images_vggt.shape[0]
+
+        pooled_vis, spatial = self._pool_visual(images_vggt, images_jepa)
+        vis = self.vis_proj(pooled_vis)   # (B, S, h)
+        S = vis.shape[1]
+
+        q_tok = self._tokenize(
+            self.query_tokenizer, queries, self.config.max_query_tokens, device
+        )
+        q_emb = self.query_encoder.get_input_embeddings()(q_tok["input_ids"])  # (B, L, q_dim)
+        q_emb = self.query_in_proj(q_emb)                                      # (B, L, h)
+        q_mask = q_tok["attention_mask"]                                        # (B, L)
+
+        x = torch.cat([vis, q_emb], dim=1)                              # (B, S+L, h)
+        vis_mask = torch.ones(B, S, device=device, dtype=q_mask.dtype)
+        full_mask = torch.cat([vis_mask, q_mask], dim=1)
+        x = self.predictor(x, src_key_padding_mask=(full_mask == 0))    # (B, S+L, h)
+
+        x_vis = x[:, :S, :]                                             # (B, S, h)
+
+        q_tokens = x[:, S:, :]                                          # (B, L, h)
+        q_mask_f = q_mask.unsqueeze(-1).float()
+        pooled_q = (q_tokens * q_mask_f).sum(1) / q_mask_f.sum(1).clamp_min(1)
+        fallback = x.mean(dim=1)
+        has_q = (q_mask.sum(dim=1) > 0).float().unsqueeze(-1)
+        pooled = pooled_q * has_q + fallback * (1.0 - has_q)            # (B, h)
+
+        return x_vis, pooled, spatial
+
     def predict_embedding(
         self,
         images_vggt: torch.Tensor,
@@ -307,44 +374,32 @@ class FusionGVJEPA(nn.Module):
     ) -> torch.Tensor:
         """Predictor branch: (S_V, X_Q) → (B, D_shared).
 
-        Follows VL-JEPA paper Sec. 3.1 (Predictor with bidirectional attention).
-
         Args:
             images_vggt : (B, S, 3, 518, 518)
             images_jepa : (B*S, 3, 1, 384, 384)
             queries     : list of B query strings (may be empty "")
         """
-        device = images_vggt.device
-        B = images_vggt.shape[0]
+        _, pooled, _ = self._run_predictor(images_vggt, images_jepa, queries)
+        return self.pred_proj(pooled)                                    # (B, D_shared)
 
-        # Visual stream: FusionGV → spatial pool → project
-        vis = self._pool_visual(images_vggt, images_jepa)  # (B, S, D_f)
-        vis = self.vis_proj(vis)                           # (B, S, h)
-        S = vis.shape[1]
+    def forward_grounding(
+        self,
+        images_vggt: torch.Tensor,
+        images_jepa: torch.Tensor,
+        queries: list[str],
+    ) -> torch.Tensor:
+        """Grounding forward: returns spatial attention logits for seg supervision.
 
-        # Query stream: tokenise → embed → project
-        q_tok = self._tokenize(
-            self.query_tokenizer, queries, self.config.max_query_tokens, device
-        )
-        q_emb = self.query_encoder.get_input_embeddings()(q_tok["input_ids"])  # (B, L, q_dim)
-        q_emb = self.query_in_proj(q_emb)                                      # (B, L, h)
-        q_mask = q_tok["attention_mask"]                                        # (B, L)
+        Requires grounding_enabled=True in config.
 
-        # Concat visual + query tokens, run bidirectional predictor
-        x = torch.cat([vis, q_emb], dim=1)                             # (B, S+L, h)
-        vis_mask = torch.ones(B, S, device=device, dtype=q_mask.dtype)
-        full_mask = torch.cat([vis_mask, q_mask], dim=1)               # (B, S+L)
-        x = self.predictor(x, src_key_padding_mask=(full_mask == 0))   # (B, S+L, h)
-
-        # Pool over query positions; fall back to full-sequence mean if query is empty
-        q_tokens = x[:, S:, :]                                         # (B, L, h)
-        q_mask_f = q_mask.unsqueeze(-1).float()
-        pooled_q = (q_tokens * q_mask_f).sum(1) / q_mask_f.sum(1).clamp_min(1)
-        fallback = x.mean(dim=1)
-        has_q = (q_mask.sum(dim=1) > 0).float().unsqueeze(-1)
-        pooled = pooled_q * has_q + fallback * (1.0 - has_q)           # (B, h)
-
-        return self.pred_proj(pooled)                                   # (B, D_shared)
+        Returns:
+            logits: (B*S, patch_grid, patch_grid)  raw pre-softmax attention logits
+                    Apply sigmoid + BCE against gt_mask derived from projected 2D bbox.
+        """
+        if self.grounding_head is None:
+            raise RuntimeError("grounding_enabled=False; set it in GVJEPAConfig.")
+        x_vis, _, spatial = self._run_predictor(images_vggt, images_jepa, queries)
+        return self.grounding_head(x_vis, spatial)                       # (B*S, G, G)
 
     def forward(
         self,

@@ -40,12 +40,45 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from fusion_gv.gvjepa import FusionGVJEPA
 from fusion_gv.preprocess import preprocess
+
+
+# ── Grounding helpers ──────────────────────────────────────────────────────────
+
+def boxes_to_patch_mask(
+    boxes: list[list[float] | None],
+    patch_grid: int = 37,
+    patch_size: int = 14,
+) -> torch.Tensor:
+    """Convert per-view 2D boxes (518×518 space) to binary patch masks.
+
+    Args:
+        boxes:      list of S entries, each [x1,y1,x2,y2] or None (not visible)
+        patch_grid: G, default 37
+        patch_size: pixels per patch, default 14
+
+    Returns:
+        masks: (S, G, G) float32 binary patch mask
+    """
+    masks = []
+    for box in boxes:
+        mask = torch.zeros(patch_grid, patch_grid, dtype=torch.float32)
+        if box is not None:
+            x1, y1, x2, y2 = box
+            px1 = max(0, int(x1 / patch_size))
+            py1 = max(0, int(y1 / patch_size))
+            px2 = min(patch_grid - 1, int(x2 / patch_size))
+            py2 = min(patch_grid - 1, int(y2 / patch_size))
+            if px2 > px1 and py2 > py1:
+                mask[py1:py2 + 1, px1:px2 + 1] = 1.0
+        masks.append(mask)
+    return torch.stack(masks)   # (S, G, G)
 
 
 # ── InfoNCE loss (bidirectional, paper Sec. 2) ─────────────────────────────────
@@ -108,6 +141,7 @@ class GVJEPADataset(Dataset):
             "image_paths": image_paths,
             "query": row.get("query", ""),
             "target": row["target"],
+            "boxes": row.get("boxes", None),   # list of S × ([x1,y1,x2,y2] | None) or None
         }
 
 
@@ -125,16 +159,17 @@ def gvjepa_collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         targets     : list of B strings
     """
     vggt_list, jepa_list = [], []
-    queries, targets = [], []
+    queries, targets, boxes_list = [], [], []
 
     for sample in batch:
         imgs_v, imgs_j = preprocess(sample["image_paths"])
         # imgs_v : (1, S, 3, 518, 518)
         # imgs_j : (S,  3, 1, 384, 384)
-        vggt_list.append(imgs_v)   # keep leading batch dim
+        vggt_list.append(imgs_v)
         jepa_list.append(imgs_j)
         queries.append(sample["query"])
         targets.append(sample["target"])
+        boxes_list.append(sample["boxes"])   # list of S boxes or None
 
     images_vggt = torch.cat(vggt_list, dim=0)   # (B, S, 3, 518, 518)
     images_jepa = torch.cat(
@@ -146,6 +181,7 @@ def gvjepa_collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "images_jepa": images_jepa,
         "query": queries,
         "target": targets,
+        "boxes": boxes_list,   # list of B × (list of S boxes | None)
     }
 
 
@@ -176,6 +212,8 @@ class GVJEPATrainer:
         log_every: int = 20,
         save_every: int = 1000,
         precision: str = "bf16",
+        grounding_loss_weight: float = 0.1,
+        grounding_pos_weight: float = 5.0,
         mlflow_logger=None,
     ) -> None:
         if max_steps <= 0:
@@ -195,6 +233,8 @@ class GVJEPATrainer:
         self.log_every = log_every
         self.save_every = save_every
         self.mlflow_logger = mlflow_logger
+        self.grounding_loss_weight = grounding_loss_weight
+        self.grounding_pos_weight  = grounding_pos_weight
         self.scaler = torch.amp.GradScaler("cuda", enabled=(precision == "fp16"))
         self.autocast_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -231,6 +271,7 @@ class GVJEPATrainer:
 
         step = 0
         running_loss = 0.0
+        running_grounding = 0.0
         pbar = tqdm(total=self.max_steps, desc="gvjepa-train")
 
         while step < self.max_steps:
@@ -245,10 +286,45 @@ class GVJEPATrainer:
                     loss = bidirectional_infonce(
                         out["pred"], out["target"], temperature=self.temperature
                     )
+
+                    # Grounding loss (only when head enabled and batch has boxes)
+                    grounding_loss = torch.tensor(0.0, device=device)
+                    boxes_batch = batch.get("boxes")
+                    if (
+                        self.model.grounding_head is not None
+                        and boxes_batch is not None
+                        and any(b is not None for b in boxes_batch)
+                    ):
+                        patch_grid = self.model.config.grounding_patch_grid
+                        gt_masks = torch.stack([
+                            boxes_to_patch_mask(b, patch_grid)
+                            if b is not None
+                            else torch.zeros(images_vggt.shape[1], patch_grid, patch_grid)
+                            for b in boxes_batch
+                        ]).to(device)                          # (B, S, G, G)
+                        B_g, S_g = gt_masks.shape[:2]
+                        gt_flat = gt_masks.reshape(B_g * S_g, patch_grid, patch_grid)
+
+                        # Only supervise views with at least one positive patch
+                        valid = gt_flat.reshape(B_g * S_g, -1).sum(dim=-1) > 0
+                        if valid.any():
+                            logits = self.model.forward_grounding(
+                                images_vggt, images_jepa, queries
+                            )                                  # (B*S, G, G)
+                            pw = torch.tensor(
+                                self.grounding_pos_weight, device=device, dtype=logits.dtype
+                            )
+                            grounding_loss = F.binary_cross_entropy_with_logits(
+                                logits[valid], gt_flat[valid], pos_weight=pw
+                            )
+
+                    loss = loss + self.grounding_loss_weight * grounding_loss
                     loss = loss / self.grad_accum_steps
 
+                grounding_loss_val = grounding_loss.item()
                 self.scaler.scale(loss).backward()
                 running_loss += loss.item() * self.grad_accum_steps
+                running_grounding += grounding_loss_val
 
                 if (step + 1) % self.grad_accum_steps == 0:
                     self.scaler.unscale_(self.optimizer)
@@ -268,16 +344,22 @@ class GVJEPATrainer:
                     entry = {
                         "step": step,
                         "loss": running_loss / self.log_every,
+                        "grounding_loss": running_grounding / self.log_every,
                         "lr": self.optimizer.param_groups[0]["lr"],
                     }
                     with open(log_path, "a") as f:
                         f.write(json.dumps(entry) + "\n")
                     if self.mlflow_logger is not None:
                         self.mlflow_logger.log_metrics(
-                            {"train/loss": entry["loss"], "train/lr": entry["lr"]},
+                            {
+                                "train/loss": entry["loss"],
+                                "train/grounding_loss": entry["grounding_loss"],
+                                "train/lr": entry["lr"],
+                            },
                             step=step,
                         )
                     running_loss = 0.0
+                    running_grounding = 0.0
 
                 if self.save_every and self.save_every > 0 and step % self.save_every == 0:
                     self._save_ckpt(step)
