@@ -308,8 +308,8 @@ class GVJEPATrainer:
                         # Only supervise views with at least one positive patch
                         valid = gt_flat.reshape(B_g * S_g, -1).sum(dim=-1) > 0
                         if valid.any():
-                            logits = self.model.forward_grounding(
-                                images_vggt, images_jepa, queries
+                            logits = self.model.grounding_head(
+                                out["x_vis"], out["spatial"]
                             )                                  # (B*S, G, G)
                             pw = torch.tensor(
                                 self.grounding_pos_weight, device=device, dtype=logits.dtype

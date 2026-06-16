@@ -411,11 +411,13 @@ class FusionGVJEPA(nn.Module):
         """Full forward pass returning pred/target embeddings for InfoNCE loss.
 
         Returns:
-            {"pred": (B, D_shared), "target": (B, D_shared)}
+            {"pred": (B, D_shared), "target": (B, D_shared),
+             "x_vis": (B, S, h), "spatial": (B, S, P, D_f)}
         """
-        pred = self.predict_embedding(images_vggt, images_jepa, queries)
+        x_vis, pooled, spatial = self._run_predictor(images_vggt, images_jepa, queries)
+        pred = self.pred_proj(pooled)
         target = self.encode_target(targets, images_vggt.device)
-        return {"pred": pred, "target": target}
+        return {"pred": pred, "target": target, "x_vis": x_vis, "spatial": spatial}
 
     def parameter_groups(self, lr: float, weight_decay: float) -> List[Dict]:
         """Parameter groups with slow LR for Y-Encoder (paper Sec. 3.2, Tab. 7b)."""
