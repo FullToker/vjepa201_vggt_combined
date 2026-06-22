@@ -60,6 +60,7 @@ htmlcov/
 env/
 venv/
 ENV/
+.local/
 env.bak/
 venv.bak/
 .mypy_cache/
