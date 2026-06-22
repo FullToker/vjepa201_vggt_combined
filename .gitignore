@@ -87,3 +87,4 @@ vggt/**/outputs/skyseg.onnx
 vggt/skyseg.onnx
 vggt/.pixi
 .env/
+logs/
