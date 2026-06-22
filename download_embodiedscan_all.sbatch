@@ -21,18 +21,19 @@ mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/vjepa201/logs "$USERBA
 
 # huggingface_hub已在容器内，跳过安装
 
+# ── 环境检查 ─────────────────────────────────────────────────────────
+echo "Checking environment..."
+$SIF python3 --version
+$SIF python3 -c "import zipfile; print('zipfile OK')"
+$SIF hf --version
+echo "Environment check passed at $(date)"
+
 # ── 1. EmbodiedScan PKL标注 ──────────────────────────────────────────
 echo "[1/2] Downloading EmbodiedScan annotations..."
-$SIF python3 -c "
-from huggingface_hub import hf_hub_download
-hf_hub_download(
-    repo_id='cjfcsjt/embodiedscan',
-    filename='embodiedscan.zip',
-    repo_type='dataset',
-    local_dir='${ANNO_DIR}',
-    token='${HF_TOKEN}',
-)
-"
+$SIF hf download cjfcsjt/embodiedscan embodiedscan.zip \
+    --repo-type dataset \
+    --local-dir "$ANNO_DIR" \
+    --token "$HF_TOKEN"
 
 echo "Extracting annotations..."
 $SIF python3 -m zipfile -e "${ANNO_DIR}/embodiedscan.zip" "${ANNO_DIR}"
@@ -57,16 +58,10 @@ PARTS=(
 
 for part in "${PARTS[@]}"; do
     echo "  -> ${part}"
-    $SIF python3 -c "
-from huggingface_hub import hf_hub_download
-hf_hub_download(
-    repo_id='GUESSGUO/annotated_posed_images_scannet',
-    filename='${part}',
-    repo_type='dataset',
-    local_dir='${IMG_DIR}',
-    token='${HF_TOKEN}',
-)
-"
+    $SIF hf download GUESSGUO/annotated_posed_images_scannet "$part" \
+        --repo-type dataset \
+        --local-dir "$IMG_DIR" \
+        --token "$HF_TOKEN"
 done
 
 echo "Extracting ScanNet images..."
