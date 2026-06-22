@@ -13,9 +13,8 @@ ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
 PYUSERBASE="$ROOT/.local"
 CONTAINER="/glob/g01-cache/container/nvpytorch24.05-py3.simg"
 SIF="srun singularity exec \
+    -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
-    --env PYTHONUSERBASE=$PYUSERBASE \
-    --env PATH=$PYUSERBASE/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     $CONTAINER"
 
 mkdir -p "$ROOT/logs" "$PYUSERBASE"
