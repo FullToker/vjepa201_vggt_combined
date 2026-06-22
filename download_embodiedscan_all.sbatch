@@ -3,6 +3,7 @@
   #SBATCH --cpus-per-task=4
   #SBATCH --mem=32G
   #SBATCH --time=48:00:00
+  #SBATCH --partition=pf
   #SBATCH --output=/glob/g01-cache/pf/Yushuo/pf/vjepa201/logs/dl_embodiedscan_all_%j.out
   #SBATCH --error=/glob/g01-cache/pf/Yushuo/pf/vjepa201/logs/dl_embodiedscan_all_%j.err
 
