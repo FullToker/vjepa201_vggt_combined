@@ -1,60 +1,77 @@
 #!/bin/bash
-  #SBATCH --job-name=dl_embodiedscan_all
-  #SBATCH --cpus-per-task=4
-  #SBATCH --mem=32G
-  #SBATCH --time=48:00:00
-  #SBATCH --partition=geo
-  #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/dl_embodiedscan_all_%j.out
-  #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/dl_embodiedscan_all_%j.err
+#SBATCH --job-name=dl_embodiedscan_all
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --time=48:00:00
+#SBATCH --partition=geo
+#SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/dl_embodiedscan_all_%j.out
+#SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/dl_embodiedscan_all_%j.err
 
-  set -euo pipefail
+set -euo pipefail
 
-  source /glob/g01-cache/pf/Yushuo/vjepa201/.env/hf.env
+source /glob/g01-cache/pf/Yushuo/vjepa201/.env/hf.env
 
-  ANNO_DIR="/glob/g01-cache/pf/Yushuo/pf/vjepa201/source_data/embodiedscan"
-  IMG_DIR="/glob/g01-cache/pf/Yushuo/pf/vjepa201/source_data/scannet"
-  mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/pf/vjepa201/logs
+CONTAINER="/glob/g01-cache/container/nvpytorch24.05-py3.simg"
+SIF="srun singularity exec -H /glob/g01-cache:/glob/g01-cache $CONTAINER"
 
-  pip install -q huggingface_hub[cli]
+ANNO_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/embodiedscan"
+IMG_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/scannet"
+mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/vjepa201/logs
 
-  # ── 1. EmbodiedScan PKL标注 ──────────────────────────────────────────
-  echo "[1/2] Downloading EmbodiedScan annotations..."
-  hf download cjfcsjt/embodiedscan embodiedscan.zip \
-      --repo-type dataset \
-      --local-dir "$ANNO_DIR" \
-      --token "$HF_TOKEN"
+# ── 安装huggingface_hub ───────────────────────────────────────────────
+echo "Installing huggingface_hub..."
+$SIF python3 -m pip install -q "huggingface_hub[cli]"
 
-  echo "Extracting annotations..."
-  python3 -m zipfile -e "${ANNO_DIR}/embodiedscan.zip" "${ANNO_DIR}"
-  rm "${ANNO_DIR}/embodiedscan.zip"
-  echo "Annotations done at $(date)"
+# ── 1. EmbodiedScan PKL标注 ──────────────────────────────────────────
+echo "[1/2] Downloading EmbodiedScan annotations..."
+$SIF python3 -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download(
+    repo_id='cjfcsjt/embodiedscan',
+    filename='embodiedscan.zip',
+    repo_type='dataset',
+    local_dir='${ANNO_DIR}',
+    token='${HF_TOKEN}',
+)
+"
 
-  # ── 2. ScanNet posed images (115GB, 11 parts) ────────────────────────
-  echo "[2/2] Downloading ScanNet posed images..."
-  PARTS=(
-    annotated.tar.gz.part00
-    annotated.tar.gz.part01
-    annotated.tar.gz.part02
-    annotated.tar.gz.part03
-    annotated.tar.gz.part04
-    annotated.tar.gz.part05
-    annotated.tar.gz.part06
-    annotated.tar.gz.part07
-    annotated.tar.gz.part08
-    annotated.tar.gz.part09
-    annotated.tar.gz.part10
-  )
+echo "Extracting annotations..."
+$SIF python3 -m zipfile -e "${ANNO_DIR}/embodiedscan.zip" "${ANNO_DIR}"
+rm "${ANNO_DIR}/embodiedscan.zip"
+echo "Annotations done at $(date)"
 
-  for part in "${PARTS[@]}"; do
-      echo "  -> ${part}"
-      hf download GUESSGUO/annotated_posed_images_scannet "$part" \
-          --repo-type dataset \
-          --local-dir "$IMG_DIR" \
-          --token "$HF_TOKEN"
-  done
+# ── 2. ScanNet posed images (115GB, 11 parts) ────────────────────────
+echo "[2/2] Downloading ScanNet posed images..."
+PARTS=(
+  annotated.tar.gz.part00
+  annotated.tar.gz.part01
+  annotated.tar.gz.part02
+  annotated.tar.gz.part03
+  annotated.tar.gz.part04
+  annotated.tar.gz.part05
+  annotated.tar.gz.part06
+  annotated.tar.gz.part07
+  annotated.tar.gz.part08
+  annotated.tar.gz.part09
+  annotated.tar.gz.part10
+)
 
-  echo "Extracting ScanNet images..."
-  cat "${IMG_DIR}"/annotated.tar.gz.part* | tar -xzf - -C "$IMG_DIR"
-  rm "${IMG_DIR}"/annotated.tar.gz.part*
+for part in "${PARTS[@]}"; do
+    echo "  -> ${part}"
+    $SIF python3 -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download(
+    repo_id='GUESSGUO/annotated_posed_images_scannet',
+    filename='${part}',
+    repo_type='dataset',
+    local_dir='${IMG_DIR}',
+    token='${HF_TOKEN}',
+)
+"
+done
 
-  echo "All done at $(date)"
+echo "Extracting ScanNet images..."
+cat "${IMG_DIR}"/annotated.tar.gz.part* | tar -xzf - -C "$IMG_DIR"
+rm "${IMG_DIR}"/annotated.tar.gz.part*
+
+echo "All done at $(date)"
