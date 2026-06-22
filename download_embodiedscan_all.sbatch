@@ -14,7 +14,7 @@ mkdir -p "$ROOT/logs"
 
 source "$ROOT/.env/hf.env"
 
-srun bash "$ROOT/vjepa2/dataset/download_embodiedscan.sh" "$ROOT/source_data/embodiedscan"
-srun bash "$ROOT/vjepa2/dataset/download_scannet_posed.sh" "$ROOT/source_data/scannet"
+srun bash "$ROOT/dataset/download_embodiedscan.sh" "$ROOT/source_data/embodiedscan"
+srun bash "$ROOT/dataset/download_scannet_posed.sh" "$ROOT/source_data/scannet"
 
 echo "All done at $(date)"
