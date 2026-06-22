@@ -12,15 +12,14 @@ set -euo pipefail
 source /glob/g01-cache/pf/Yushuo/vjepa201/.env/hf.env
 
 CONTAINER="/glob/g01-cache/container/nvpytorch24.05-py3.simg"
-SIF="srun singularity exec -H /glob/g01-cache:/glob/g01-cache $CONTAINER"
+USERBASE="/glob/g01-cache/pf/Yushuo/vjepa201/.local"
+SIF="srun singularity exec -H /glob/g01-cache:/glob/g01-cache --env PYTHONUSERBASE=$USERBASE $CONTAINER"
 
 ANNO_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/embodiedscan"
 IMG_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/scannet"
-mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/vjepa201/logs
+mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/vjepa201/logs "$USERBASE"
 
-# ── 安装huggingface_hub ───────────────────────────────────────────────
-echo "Installing huggingface_hub..."
-$SIF python3 -m pip install -q "huggingface_hub[cli]"
+# huggingface_hub已在容器内，跳过安装
 
 # ── 1. EmbodiedScan PKL标注 ──────────────────────────────────────────
 echo "[1/2] Downloading EmbodiedScan annotations..."
