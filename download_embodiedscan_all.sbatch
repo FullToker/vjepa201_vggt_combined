@@ -11,20 +11,21 @@ set -euo pipefail
 
 source /glob/g01-cache/pf/Yushuo/vjepa201/.env/hf.env
 
+HF_BIN="/glob/g01-cache/pf/Yushuo/vjepa201/.local/bin"
 CONTAINER="/glob/g01-cache/container/nvpytorch24.05-py3.simg"
-USERBASE="/glob/g01-cache/pf/Yushuo/vjepa201/.local"
-SIF="srun singularity exec -H /glob/g01-cache:/glob/g01-cache --env PYTHONUSERBASE=$USERBASE $CONTAINER"
+SIF="srun singularity exec -H /glob/g01-cache:/glob/g01-cache --env PATH=$HF_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin $CONTAINER"
 
 ANNO_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/embodiedscan"
 IMG_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/scannet"
-mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/vjepa201/logs "$USERBASE"
+mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/vjepa201/logs "$HF_BIN"
 
-# huggingface_hub已在容器内，跳过安装
+# ── 安装hf CLI到可写目录 ──────────────────────────────────────────────
+echo "Installing hf CLI..."
+$SIF bash -c "curl -LsSf https://hf.co/cli/install.sh | CARGO_HOME=$HF_BIN bash"
 
 # ── 环境检查 ─────────────────────────────────────────────────────────
 echo "Checking environment..."
 $SIF python3 --version
-$SIF python3 -c "import zipfile; print('zipfile OK')"
 $SIF hf --version
 echo "Environment check passed at $(date)"
 
