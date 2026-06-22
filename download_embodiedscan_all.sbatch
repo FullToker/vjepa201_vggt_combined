@@ -21,7 +21,7 @@ mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/vjepa201/logs "$HF_BIN
 
 # ── 安装hf CLI到可写目录 ──────────────────────────────────────────────
 echo "Installing hf CLI..."
-$SIF bash -c "curl -LsSf https://hf.co/cli/install.sh | CARGO_HOME=$HF_BIN bash"
+$SIF bash -c "curl -LsSf https://hf.co/cli/install.sh | HF_INSTALL_DIR=$HF_BIN bash"
 
 # ── 环境检查 ─────────────────────────────────────────────────────────
 echo "Checking environment..."
