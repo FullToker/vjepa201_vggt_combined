@@ -9,64 +9,12 @@
 
 set -euo pipefail
 
-source /glob/g01-cache/pf/Yushuo/vjepa201/.env/hf.env
+ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
+mkdir -p "$ROOT/logs"
 
-HF_BIN="/glob/g01-cache/pf/Yushuo/vjepa201/.local/bin"
-CONTAINER="/glob/g01-cache/container/nvpytorch24.05-py3.simg"
-SIF="srun singularity exec --bind /glob/g01-cache:/glob/g01-cache --env HOME=/glob/g01-cache/pf/Yushuo/vjepa201 --env PATH=$HF_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin $CONTAINER"
+source "$ROOT/.env/hf.env"
 
-ANNO_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/embodiedscan"
-IMG_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/scannet"
-mkdir -p "$ANNO_DIR" "$IMG_DIR" /glob/g01-cache/pf/Yushuo/vjepa201/logs "$HF_BIN"
-
-# ── 安装hf CLI到可写目录 ──────────────────────────────────────────────
-echo "Installing hf CLI..."
-$SIF bash -c "curl -LsSf https://hf.co/cli/install.sh | HF_INSTALL_DIR=$HF_BIN bash"
-
-# ── 环境检查 ─────────────────────────────────────────────────────────
-echo "Checking environment..."
-$SIF python3 --version
-$SIF hf --version
-echo "Environment check passed at $(date)"
-
-# ── 1. EmbodiedScan PKL标注 ──────────────────────────────────────────
-echo "[1/2] Downloading EmbodiedScan annotations..."
-$SIF hf download cjfcsjt/embodiedscan embodiedscan.zip \
-    --repo-type dataset \
-    --local-dir "$ANNO_DIR" \
-    --token "$HF_TOKEN"
-
-echo "Extracting annotations..."
-$SIF python3 -m zipfile -e "${ANNO_DIR}/embodiedscan.zip" "${ANNO_DIR}"
-rm "${ANNO_DIR}/embodiedscan.zip"
-echo "Annotations done at $(date)"
-
-# ── 2. ScanNet posed images (115GB, 11 parts) ────────────────────────
-echo "[2/2] Downloading ScanNet posed images..."
-PARTS=(
-  annotated.tar.gz.part00
-  annotated.tar.gz.part01
-  annotated.tar.gz.part02
-  annotated.tar.gz.part03
-  annotated.tar.gz.part04
-  annotated.tar.gz.part05
-  annotated.tar.gz.part06
-  annotated.tar.gz.part07
-  annotated.tar.gz.part08
-  annotated.tar.gz.part09
-  annotated.tar.gz.part10
-)
-
-for part in "${PARTS[@]}"; do
-    echo "  -> ${part}"
-    $SIF hf download GUESSGUO/annotated_posed_images_scannet "$part" \
-        --repo-type dataset \
-        --local-dir "$IMG_DIR" \
-        --token "$HF_TOKEN"
-done
-
-echo "Extracting ScanNet images..."
-cat "${IMG_DIR}"/annotated.tar.gz.part* | tar -xzf - -C "$IMG_DIR"
-rm "${IMG_DIR}"/annotated.tar.gz.part*
+srun bash "$ROOT/vjepa2/dataset/download_embodiedscan.sh" "$ROOT/source_data/embodiedscan"
+srun bash "$ROOT/vjepa2/dataset/download_scannet_posed.sh" "$ROOT/source_data/scannet"
 
 echo "All done at $(date)"
