@@ -13,7 +13,7 @@ source /glob/g01-cache/pf/Yushuo/vjepa201/.env/hf.env
 
 HF_BIN="/glob/g01-cache/pf/Yushuo/vjepa201/.local/bin"
 CONTAINER="/glob/g01-cache/container/nvpytorch24.05-py3.simg"
-SIF="srun singularity exec -H /glob/g01-cache:/glob/g01-cache --env PATH=$HF_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin $CONTAINER"
+SIF="srun singularity exec --bind /glob/g01-cache:/glob/g01-cache --env HOME=/glob/g01-cache/pf/Yushuo/vjepa201 --env PATH=$HF_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin $CONTAINER"
 
 ANNO_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/embodiedscan"
 IMG_DIR="/glob/g01-cache/pf/Yushuo/vjepa201/source_data/scannet"
