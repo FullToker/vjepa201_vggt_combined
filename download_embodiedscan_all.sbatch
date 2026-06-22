@@ -37,7 +37,7 @@ $SIF hf --version
 echo "All checks passed at $(date)"
 
 # ── 下载 ──────────────────────────────────────────────────────────────
-$SIF bash "$ROOT/vjepa2/dataset/download_embodiedscan.sh" "$ROOT/source_data/embodiedscan"
-$SIF bash "$ROOT/vjepa2/dataset/download_scannet_posed.sh" "$ROOT/source_data/scannet"
+$SIF bash "$ROOT/dataset/download_embodiedscan.sh" "$ROOT/source_data/embodiedscan"
+$SIF bash "$ROOT/dataset/download_scannet_posed.sh" "$ROOT/source_data/scannet"
 
 echo "All done at $(date)"
