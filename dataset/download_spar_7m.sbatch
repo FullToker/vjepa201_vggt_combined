@@ -23,7 +23,7 @@ echo "Checking environment..."
 $SIF wget --version | head -1
 echo "Environment check passed at $(date)"
 
-$SIF bash "$ROOT/vjepa2/dataset/download_spar_7m_rgbd.sh" \
+$SIF bash "$ROOT/dataset/download_spar_7m_rgbd.sh" \
     --output-dir "$ROOT/source_data" \
     --extract \
     --delete-archives
