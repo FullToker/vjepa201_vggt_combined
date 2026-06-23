@@ -150,8 +150,8 @@ train:
 mlflow:
   enabled: true
   env_file: .env/mlflow.env
-  # null means use MLFLOW_EXPERIMENT_NAME from env_file.
-  experiment_name: null
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_pretrain
   # null means auto-name from x_encoder_type and train.output_dir.
   run_name: null
   log_params: true

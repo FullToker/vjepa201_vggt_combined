@@ -113,7 +113,7 @@ def start_mlflow_run(cfg: Dict[str, Any]) -> AbstractContextManager:
     except ImportError as exc:
         raise ImportError("mlflow is required when mlflow.enabled=true") from exc
 
-    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
+    tracking_uri = mcfg.get("tracking_uri") or os.environ.get("MLFLOW_TRACKING_URI")
     if tracking_uri:
         mlflow.set_tracking_uri(tracking_uri)
 
