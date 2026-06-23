@@ -16,8 +16,12 @@ srun singularity exec \
     -H /glob/g01-cache:/glob/g01-cache \
     /glob/g01-cache/container/nvpytorch24.05-py3.simg \
     bash -c "
+        mkdir -p /glob/g01-cache/pf/Yushuo/tmp && \
+        TMPDIR=/glob/g01-cache/pf/Yushuo/tmp \
         pip install --quiet --target=/glob/g01-cache/pf/Yushuo/pylibs mlflow && \
+        TMPDIR=/glob/g01-cache/pf/Yushuo/tmp \
         PYTHONPATH=/glob/g01-cache/pf/Yushuo/pylibs \
+        MLFLOW_ALLOW_FILE_STORE=true \
         python -m mlflow server \
             --backend-store-uri file:///glob/g01-cache/pf/Yushuo/mlruns \
             --host 0.0.0.0 \
