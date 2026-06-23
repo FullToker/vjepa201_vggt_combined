@@ -17,8 +17,11 @@ srun singularity exec \
     /glob/g01-cache/container/nvpytorch24.05-py3.simg \
     bash -c "
         mkdir -p /glob/g01-cache/pf/Yushuo/tmp && \
-        TMPDIR=/glob/g01-cache/pf/Yushuo/tmp \
-        pip install --quiet --target=/glob/g01-cache/pf/Yushuo/pylibs mlflow && \
+        if ! PYTHONPATH=/glob/g01-cache/pf/Yushuo/pylibs python -c 'import mlflow' 2>/dev/null; then \
+            echo 'Installing mlflow...' && \
+            TMPDIR=/glob/g01-cache/pf/Yushuo/tmp \
+            pip install --quiet --target=/glob/g01-cache/pf/Yushuo/pylibs mlflow; \
+        fi && \
         TMPDIR=/glob/g01-cache/pf/Yushuo/tmp \
         PYTHONPATH=/glob/g01-cache/pf/Yushuo/pylibs \
         MLFLOW_ALLOW_FILE_STORE=true \
