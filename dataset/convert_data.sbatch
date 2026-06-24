@@ -19,21 +19,28 @@ SIF="srun singularity exec \
 mkdir -p "$ROOT/logs" "$ROOT/data"
 
 # ── EmbodiedScan train ────────────────────────────────────────────────────────
-echo "[1/2] EmbodiedScan convert start $(date)"
-$SIF python3 "$ROOT/dataset/convert_embodiedscan.py" \
-    --split train \
-    --data-root "$ROOT/source_data" \
-    --output "$ROOT/data/embodiedscan_train.jsonl" \
-    --max-views 4
-echo "[1/2] EmbodiedScan done $(date)"
+CONVERT_ESCAN=${CONVERT_ESCAN:-1}
+CONVERT_SPAR=${CONVERT_SPAR:-1}
+
+if [ "$CONVERT_ESCAN" = "1" ]; then
+    echo "[escan] EmbodiedScan convert start $(date)"
+    $SIF python3 "$ROOT/dataset/convert_embodiedscan.py" \
+        --split train \
+        --data-root "$ROOT/source_data" \
+        --output "$ROOT/data/embodiedscan_train.jsonl" \
+        --max-views 4
+    echo "[escan] EmbodiedScan done $(date)"
+fi
 
 # ── SPAR-7M SFT QA (train + eval) ────────────────────────────────────────────
-echo "[2/2] SPAR convert start $(date)"
-$SIF python3 "$ROOT/dataset/convert_spar_sftqa.py" \
-    --spar-root "$ROOT/source_data/spar" \
-    --output-dir "$ROOT/data" \
-    --num-frames 4 \
-    --only both
-echo "[2/2] SPAR done $(date)"
+if [ "$CONVERT_SPAR" = "1" ]; then
+    echo "[spar] SPAR convert start $(date)"
+    $SIF python3 "$ROOT/dataset/convert_spar_sftqa.py" \
+        --spar-root "$ROOT/source_data/spar" \
+        --output-dir "$ROOT/data" \
+        --num-frames 4 \
+        --only both
+    echo "[spar] SPAR done $(date)"
+fi
 
 echo "All done $(date)"
