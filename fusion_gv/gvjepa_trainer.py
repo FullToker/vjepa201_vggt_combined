@@ -425,6 +425,7 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     )
 
     m = cfg["model"]
+    g = cfg.get("grounding", {})
     model_cfg = GVJEPAConfig(
         fusion=fusion_cfg,
         use_fusion_level=m.get("use_fusion_level", 3),
@@ -440,6 +441,12 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
         shared_embed_dim=m["shared_embed_dim"],
         y_encoder_lr_multiplier=m.get("y_encoder_lr_multiplier", 0.05),
         hf_cache_dir=m.get("hf_cache_dir", "./ckpts"),
+        grounding_enabled=g.get("enabled", False),
+        grounding_num_layers=g.get("num_layers", 3),
+        grounding_num_heads=g.get("num_heads", 8),
+        grounding_ffn_mult=g.get("ffn_mult", 4),
+        grounding_dropout=g.get("dropout", 0.0),
+        grounding_patch_grid=g.get("patch_grid", 37),
     )
     return FusionGVJEPA(model_cfg)
 
