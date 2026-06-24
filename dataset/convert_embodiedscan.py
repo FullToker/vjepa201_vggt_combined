@@ -57,13 +57,25 @@ def project_box(
     cam2global: np.ndarray,
     cam2img: np.ndarray,
     orig_hw: tuple[int, int],
+    axis_align_matrix: np.ndarray | None = None,
 ) -> list[float] | None:
     """Project 8 world corners → [x1,y1,x2,y2] in 518×518 space, or None.
 
-    cam2global: (4,4) camera-to-world (mmdet3d convention).
-    cam2img:    (4,4) or (3,3) intrinsic — only top-left 3×3 used.
+    corners_w:          (8,3) in axis-aligned world frame (bbox_3d frame).
+    cam2global:         (4,4) camera-to-original-world (mmdet3d convention).
+    axis_align_matrix:  (4,4) aligned = axis_align_matrix @ original → need inv to go back.
+    cam2img:            (4,4) or (3,3) intrinsic — only top-left 3×3 used.
     """
     H, W = orig_hw
+
+    # corners_w is in axis-aligned frame; cam2global is in original (unaligned) frame.
+    # Convert corners back to original world frame via inv(axis_align_matrix).
+    if axis_align_matrix is not None:
+        align_inv = np.linalg.inv(axis_align_matrix)
+        ones = np.ones((corners_w.shape[0], 1))
+        corners_h = np.hstack([corners_w, ones])        # (8,4)
+        corners_w = (align_inv @ corners_h.T).T[:, :3]  # (8,3) original world frame
+
     R = cam2global[:3, :3]
     t = cam2global[:3, 3]
     cam_pts = (corners_w - t) @ R          # (8,3)  [R.T via right-multiply]
@@ -147,9 +159,10 @@ def convert(
                 skipped_no_inst += 1
                 continue
 
-            corners_w = bbox7_to_corners(inst["bbox_3d"])
-            cam2img   = np.asarray(sample["cam2img"], dtype=np.float64)
-            orig_hw   = infer_hw(cam2img)
+            corners_w         = bbox7_to_corners(inst["bbox_3d"])
+            cam2img           = np.asarray(sample["cam2img"], dtype=np.float64)
+            axis_align_matrix = np.asarray(sample["axis_align_matrix"], dtype=np.float64)
+            orig_hw           = infer_hw(cam2img)
 
             # Prefer views where target is visible; fall back to all views
             all_views = sample["images"]
@@ -164,7 +177,7 @@ def convert(
 
             for v in selected:
                 cam2global = np.asarray(v["cam2global"], dtype=np.float64)
-                box        = project_box(corners_w, cam2global, cam2img, orig_hw)
+                box        = project_box(corners_w, cam2global, cam2img, orig_hw, axis_align_matrix)
                 images.append(str(data_root / v["img_path"]))
                 boxes.append(box)
 
