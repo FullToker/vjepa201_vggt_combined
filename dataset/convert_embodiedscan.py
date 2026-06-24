@@ -130,8 +130,10 @@ def convert(
         if s["sample_idx"].startswith("scannet/") and "cam2img" in s
     }
 
-    # Load VG JSON
-    vg_path   = ann_dir / f"embodiedscan_{split}_vg.json"
+    # Load VG JSON (use _all variant when available for full annotations)
+    vg_path_all = ann_dir / f"embodiedscan_{split}_vg_all.json"
+    vg_path     = vg_path_all if vg_path_all.exists() else ann_dir / f"embodiedscan_{split}_vg.json"
+    print(f"Loading VG from {vg_path}")
     vg_entries = json.load(open(vg_path))
 
     rows_written      = 0
