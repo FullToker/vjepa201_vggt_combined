@@ -10,7 +10,7 @@
 set -euo pipefail
 
 ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
-CONTAINER="/glob/g01-cache/container/nvpytorch24.05-py3.simg"
+CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 SIF="srun singularity exec \
     -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
