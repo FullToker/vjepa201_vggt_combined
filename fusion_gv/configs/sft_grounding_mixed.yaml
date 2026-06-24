@@ -59,13 +59,17 @@ grounding:
   patch_grid:  37        # 518 / 14 = 37
   loss_weight: 0.1       # grounding BCE contribution to total loss
   pos_weight:  5.0       # BCE positive-class weight (background >> foreground)
+  batch_ratio: 5         # 1 grounding batch per 5 SPAR batches
 
 
-# ── Dataset (mixed: SPAR SFT + EmbodiedScan grounding) ───────────────────────
+# ── Dataset (alternating: SPAR SFT ↔ EmbodiedScan grounding) ─────────────────
 data:
-  train_manifests:
-    - ./data/spar_sftqa_train.jsonl        # SPAR: InfoNCE only (no boxes)
-    - ./data/embodiedscan_train.jsonl      # EmbodiedScan: InfoNCE + grounding
+  # SPAR: InfoNCE only (no boxes)
+  spar_manifests:
+    - ./data/spar_sftqa_train.jsonl
+  # EmbodiedScan: grounding BCE only (boxes present, InfoNCE skipped)
+  grounding_manifests:
+    - ./data/embodiedscan_train.jsonl
   num_frames:         4
   num_workers:        16
   pin_memory:         true

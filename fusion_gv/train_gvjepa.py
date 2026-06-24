@@ -24,6 +24,7 @@ from fusion_gv.mlflow_utils import start_mlflow_run
 from fusion_gv.gvjepa_trainer import (
     GVJEPATrainer,
     build_loader_from_config,
+    build_grounding_loader_from_config,
     build_model_from_config,
     build_optimizer_and_scheduler_from_config,
 )
@@ -106,13 +107,16 @@ def main() -> None:
     device_str = tcfg.get("device", "cuda")
     device = torch.device(device_str if torch.cuda.is_available() else "cpu")
 
-    model     = build_model_from_config(cfg)
-    loader    = build_loader_from_config(cfg)
+    model            = build_model_from_config(cfg)
+    loader           = build_loader_from_config(cfg)
+    grounding_loader = build_grounding_loader_from_config(cfg)
     optimizer, scheduler = build_optimizer_and_scheduler_from_config(model, cfg)
 
     if args.overfit:
         print(f"[overfit] Freezing {args.overfit_samples} samples, running {args.overfit_steps} steps...")
-        loader    = _build_overfit_loader(loader, args.overfit_samples)
+        loader = _build_overfit_loader(loader, args.overfit_samples)
+        if grounding_loader is not None:
+            grounding_loader = _build_overfit_loader(grounding_loader, args.overfit_samples)
         tcfg["max_steps"] = args.overfit_steps
         tcfg["log_every"] = 10
         tcfg["save_every"] = 0
@@ -136,6 +140,8 @@ def main() -> None:
             output_dir=tcfg["output_dir"],
             max_steps=tcfg["max_steps"],
             scheduler=scheduler,
+            grounding_loader=grounding_loader,
+            grounding_ratio=gcfg.get("batch_ratio", 5),
             grad_accum_steps=1 if args.overfit else tcfg.get("gradient_accumulation_steps", 1),
             clip_grad_norm=tcfg.get("clip_grad_norm", 1.0),
             temperature=tcfg.get("temperature", 0.07),

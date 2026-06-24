@@ -206,6 +206,8 @@ class GVJEPATrainer:
         output_dir: str | Path,
         max_steps: int,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
+        grounding_loader: Optional[DataLoader] = None,
+        grounding_ratio: int = 5,
         grad_accum_steps: int = 1,
         clip_grad_norm: float = 1.0,
         temperature: float = 0.07,
@@ -225,6 +227,8 @@ class GVJEPATrainer:
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.train_loader = train_loader
+        self.grounding_loader = grounding_loader
+        self.grounding_ratio = grounding_ratio
         self.output_dir = Path(output_dir)
         self.max_steps = max_steps
         self.grad_accum_steps = grad_accum_steps
@@ -262,110 +266,140 @@ class GVJEPATrainer:
             json.dump(meta, f, indent=2)
         return path
 
+    def _grounding_step(
+        self,
+        batch: dict,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, float]:
+        """Forward + grounding BCE only. Returns (loss, grounding_loss_val)."""
+        images_vggt = batch["images_vggt"].to(device, non_blocking=True)
+        images_jepa = batch["images_jepa"].to(device, non_blocking=True)
+
+        with torch.autocast(device_type=device.type, dtype=self.autocast_dtype):
+            out = self.model(images_vggt, images_jepa, batch["query"], batch["target"])
+
+            grounding_loss = torch.tensor(0.0, device=device)
+            boxes_batch = batch.get("boxes")
+            if (
+                self.model.grounding_head is not None
+                and boxes_batch is not None
+                and any(b is not None for b in boxes_batch)
+            ):
+                patch_grid = self.model.config.grounding_patch_grid
+                gt_masks = torch.stack([
+                    boxes_to_patch_mask(b, patch_grid)
+                    if b is not None
+                    else torch.zeros(images_vggt.shape[1], patch_grid, patch_grid)
+                    for b in boxes_batch
+                ]).to(device)
+                B_g, S_g = gt_masks.shape[:2]
+                gt_flat = gt_masks.reshape(B_g * S_g, patch_grid, patch_grid)
+                valid = gt_flat.reshape(B_g * S_g, -1).sum(dim=-1) > 0
+                if valid.any():
+                    logits = self.model.grounding_head(out["x_vis"], out["spatial"])
+                    pw = torch.tensor(self.grounding_pos_weight, device=device, dtype=logits.dtype)
+                    grounding_loss = F.binary_cross_entropy_with_logits(
+                        logits[valid], gt_flat[valid], pos_weight=pw
+                    )
+
+            loss = self.grounding_loss_weight * grounding_loss / self.grad_accum_steps
+
+        return loss, grounding_loss.item()
+
+    def _spar_step(
+        self,
+        batch: dict,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, float]:
+        """Forward + InfoNCE only. Returns (loss, infonce_loss_val)."""
+        images_vggt = batch["images_vggt"].to(device, non_blocking=True)
+        images_jepa = batch["images_jepa"].to(device, non_blocking=True)
+
+        with torch.autocast(device_type=device.type, dtype=self.autocast_dtype):
+            out = self.model(images_vggt, images_jepa, batch["query"], batch["target"])
+            loss = bidirectional_infonce(out["pred"], out["target"], temperature=self.temperature)
+            loss = loss / self.grad_accum_steps
+
+        return loss, loss.item() * self.grad_accum_steps
+
     def fit(self, device: torch.device) -> None:
         """Run training until max_steps is reached."""
+        import itertools
+
         self.model.to(device)
         self.model.train()
         meta_path = self._write_meta(device)
         log_path = self.output_dir / "train_log.jsonl"
 
+        spar_iter = itertools.cycle(self.train_loader)
+        grounding_iter = itertools.cycle(self.grounding_loader) if self.grounding_loader else None
+
         step = 0
         running_loss = 0.0
+        running_infonce = 0.0
         running_grounding = 0.0
         pbar = tqdm(total=self.max_steps, desc="gvjepa-train")
 
         while step < self.max_steps:
-            for batch in self.train_loader:
-                images_vggt = batch["images_vggt"].to(device, non_blocking=True)
-                images_jepa = batch["images_jepa"].to(device, non_blocking=True)
-                queries = batch["query"]
-                targets = batch["target"]
+            # alternate: every grounding_ratio steps, use one grounding batch
+            use_grounding = (
+                grounding_iter is not None
+                and step % self.grounding_ratio == 0
+            )
 
-                with torch.autocast(device_type=device.type, dtype=self.autocast_dtype):
-                    out = self.model(images_vggt, images_jepa, queries, targets)
-                    loss = bidirectional_infonce(
-                        out["pred"], out["target"], temperature=self.temperature
+            if use_grounding:
+                batch = next(grounding_iter)
+                loss, grounding_val = self._grounding_step(batch, device)
+                infonce_val = 0.0
+            else:
+                batch = next(spar_iter)
+                loss, infonce_val = self._spar_step(batch, device)
+                grounding_val = 0.0
+
+            self.scaler.scale(loss).backward()
+            running_loss      += loss.item() * self.grad_accum_steps
+            running_infonce   += infonce_val
+            running_grounding += grounding_val
+
+            if (step + 1) % self.grad_accum_steps == 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad_norm)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+                if self.scheduler is not None:
+                    self.scheduler.step()
+
+            step += 1
+            pbar.update(1)
+
+            if step % self.log_every == 0:
+                entry = {
+                    "step": step,
+                    "loss": running_loss / self.log_every,
+                    "infonce_loss": running_infonce / self.log_every,
+                    "grounding_loss": running_grounding / self.log_every,
+                    "lr": self.optimizer.param_groups[0]["lr"],
+                }
+                with open(log_path, "a") as f:
+                    f.write(json.dumps(entry) + "\n")
+                if self.mlflow_logger is not None:
+                    self.mlflow_logger.log_metrics(
+                        {
+                            "train/loss":           entry["loss"],
+                            "train/infonce_loss":   entry["infonce_loss"],
+                            "train/grounding_loss": entry["grounding_loss"],
+                            "train/lr":             entry["lr"],
+                        },
+                        step=step,
                     )
+                running_loss = running_infonce = running_grounding = 0.0
 
-                    # Grounding loss (only when head enabled and batch has boxes)
-                    grounding_loss = torch.tensor(0.0, device=device)
-                    boxes_batch = batch.get("boxes")
-                    if (
-                        self.model.grounding_head is not None
-                        and boxes_batch is not None
-                        and any(b is not None for b in boxes_batch)
-                    ):
-                        patch_grid = self.model.config.grounding_patch_grid
-                        gt_masks = torch.stack([
-                            boxes_to_patch_mask(b, patch_grid)
-                            if b is not None
-                            else torch.zeros(images_vggt.shape[1], patch_grid, patch_grid)
-                            for b in boxes_batch
-                        ]).to(device)                          # (B, S, G, G)
-                        B_g, S_g = gt_masks.shape[:2]
-                        gt_flat = gt_masks.reshape(B_g * S_g, patch_grid, patch_grid)
+            if self.save_every and self.save_every > 0 and step % self.save_every == 0:
+                self._save_ckpt(step)
 
-                        # Only supervise views with at least one positive patch
-                        valid = gt_flat.reshape(B_g * S_g, -1).sum(dim=-1) > 0
-                        if valid.any():
-                            logits = self.model.grounding_head(
-                                out["x_vis"], out["spatial"]
-                            )                                  # (B*S, G, G)
-                            pw = torch.tensor(
-                                self.grounding_pos_weight, device=device, dtype=logits.dtype
-                            )
-                            grounding_loss = F.binary_cross_entropy_with_logits(
-                                logits[valid], gt_flat[valid], pos_weight=pw
-                            )
-
-                    loss = loss + self.grounding_loss_weight * grounding_loss
-                    loss = loss / self.grad_accum_steps
-
-                grounding_loss_val = grounding_loss.item()
-                self.scaler.scale(loss).backward()
-                running_loss += loss.item() * self.grad_accum_steps
-                running_grounding += grounding_loss_val
-
-                if (step + 1) % self.grad_accum_steps == 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.clip_grad_norm
-                    )
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.optimizer.zero_grad(set_to_none=True)
-                    if self.scheduler is not None:
-                        self.scheduler.step()
-
-                step += 1
-                pbar.update(1)
-
-                if step % self.log_every == 0:
-                    entry = {
-                        "step": step,
-                        "loss": running_loss / self.log_every,
-                        "grounding_loss": running_grounding / self.log_every,
-                        "lr": self.optimizer.param_groups[0]["lr"],
-                    }
-                    with open(log_path, "a") as f:
-                        f.write(json.dumps(entry) + "\n")
-                    if self.mlflow_logger is not None:
-                        self.mlflow_logger.log_metrics(
-                            {
-                                "train/loss": entry["loss"],
-                                "train/grounding_loss": entry["grounding_loss"],
-                                "train/lr": entry["lr"],
-                            },
-                            step=step,
-                        )
-                    running_loss = 0.0
-                    running_grounding = 0.0
-
-                if self.save_every and self.save_every > 0 and step % self.save_every == 0:
-                    self._save_ckpt(step)
-
-                if step >= self.max_steps:
-                    break
+            if step >= self.max_steps:
+                break
 
         final_ckpt = self._save_ckpt(step, filename="final.pt")
         if self.mlflow_logger is not None:
@@ -451,27 +485,21 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     return FusionGVJEPA(model_cfg)
 
 
-def build_loader_from_config(cfg: dict) -> DataLoader:
-    """Build DataLoader from a parsed YAML config dict."""
+def _build_loader(manifests: list[str], dcfg: dict, batch_size: int) -> DataLoader:
+    """Build a DataLoader from a list of manifest paths and data config."""
     from pathlib import Path
+    from torch.utils.data import ConcatDataset
 
-    dcfg = cfg["data"]
-    manifests = dcfg["train_manifests"]
     datasets = []
     for path in manifests:
         if not Path(path).exists():
-            raise FileNotFoundError(f"Training manifest not found: {path}")
+            raise FileNotFoundError(f"Manifest not found: {path}")
         datasets.append(GVJEPADataset(path))
 
-    if len(datasets) == 1:
-        ds = datasets[0]
-    else:
-        from torch.utils.data import ConcatDataset
-        ds = ConcatDataset(datasets)
-
+    ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     num_workers = dcfg.get("num_workers", 4)
     loader_kwargs = {
-        "batch_size": cfg["train"]["batch_size"],
+        "batch_size": batch_size,
         "shuffle": True,
         "num_workers": num_workers,
         "pin_memory": dcfg.get("pin_memory", True),
@@ -481,8 +509,23 @@ def build_loader_from_config(cfg: dict) -> DataLoader:
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = dcfg.get("persistent_workers", True)
         loader_kwargs["prefetch_factor"] = dcfg.get("prefetch_factor", 4)
-
     return DataLoader(ds, **loader_kwargs)
+
+
+def build_loader_from_config(cfg: dict) -> DataLoader:
+    """Build SPAR DataLoader from config (uses data.spar_manifests or data.train_manifests)."""
+    dcfg = cfg["data"]
+    manifests = dcfg.get("spar_manifests") or dcfg["train_manifests"]
+    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"])
+
+
+def build_grounding_loader_from_config(cfg: dict) -> Optional[DataLoader]:
+    """Build EmbodiedScan grounding DataLoader from config. Returns None if not configured."""
+    dcfg = cfg["data"]
+    manifests = dcfg.get("grounding_manifests")
+    if not manifests:
+        return None
+    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"])
 
 
 def build_optimizer_and_scheduler_from_config(
