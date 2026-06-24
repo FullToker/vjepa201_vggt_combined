@@ -10,4 +10,17 @@
 srun singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     /glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif \
-    python3 /glob/g01-cache/pf/Yushuo/vjepa201/inspect.py
+    python3 - << 'PYEOF'
+import pickle
+
+pkl = '/glob/g01-cache/pf/Yushuo/vjepa201/source_data/embodiedscan/embodiedscan/embodiedscan_infos_train.pkl'
+data = pickle.load(open(pkl, 'rb'))
+s = data['data_list'][0]
+print('sample keys:', list(s.keys()))
+if s.get('images'):
+    print('images[0] keys:', list(s['images'][0].keys()))
+else:
+    print('no images key')
+for k, v in s.items():
+    print(k, ':', str(v)[:200])
+PYEOF
