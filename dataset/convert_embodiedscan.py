@@ -112,7 +112,11 @@ def convert(
     # Load PKL and build scan_id → sample lookup
     pkl_path = ann_dir / f"embodiedscan_infos_{split}.pkl"
     data     = pickle.load(open(pkl_path, "rb"))
-    scan2sample: dict[str, dict] = {s["sample_idx"]: s for s in data["data_list"]}
+    scan2sample: dict[str, dict] = {
+        s["sample_idx"]: s
+        for s in data["data_list"]
+        if s["sample_idx"].startswith("scannet/") and "cam2img" in s
+    }
 
     # Load VG JSON
     vg_path   = ann_dir / f"embodiedscan_{split}_vg.json"
