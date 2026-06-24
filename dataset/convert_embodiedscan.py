@@ -166,13 +166,18 @@ def convert(
             axis_align_matrix = np.asarray(sample["axis_align_matrix"], dtype=np.float64)
             orig_hw           = infer_hw(cam2img)
 
-            # Prefer views where target is visible; fall back to all views
+            # Prefer views where target is visible; uniformly sample for diversity
             all_views = sample["images"]
             visible   = [
                 v for v in all_views
                 if target_id in v.get("visible_instance_ids", [])
             ]
-            selected = (visible if visible else all_views)[:max_views]
+            pool = visible if visible else all_views
+            if len(pool) <= max_views:
+                selected = pool
+            else:
+                step = len(pool) / max_views
+                selected = [pool[int(i * step)] for i in range(max_views)]
 
             images: list[str]               = []
             boxes:  list[list[float] | None] = []

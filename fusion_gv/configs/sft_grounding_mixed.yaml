@@ -70,7 +70,7 @@ data:
   # EmbodiedScan: grounding BCE only (boxes present, InfoNCE skipped)
   grounding_manifests:
     - ./data/embodiedscan_train.jsonl
-  num_frames:         4
+  num_frames:         4    # SPAR (EmbodiedScan uses 8 via --max-views 8 at convert time)
   num_workers:        16
   pin_memory:         true
   persistent_workers: true

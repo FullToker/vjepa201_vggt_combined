@@ -28,7 +28,7 @@ if [ "$CONVERT_ESCAN" = "1" ]; then
         --split train \
         --data-root "$ROOT/source_data" \
         --output "$ROOT/data/embodiedscan_train.jsonl" \
-        --max-views 4
+        --max-views 8
     echo "[escan] EmbodiedScan done $(date)"
 fi
 
