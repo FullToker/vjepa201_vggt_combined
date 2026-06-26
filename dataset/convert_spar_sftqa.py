@@ -28,6 +28,8 @@ import re
 from pathlib import Path
 from typing import Iterable, Sequence, TextIO
 
+import numpy as np
+
 TRAIN_KINDS = ("sentence", "fill")
 EVAL_KINDS = ("select",)
 OPTION_RE = re.compile(r"^\s*([A-Z])\s*[\.)]\s*(.+?)\s*$")
@@ -46,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-output", default="spar_sftqa_train.jsonl", help="Train manifest filename under --output-dir.")
     parser.add_argument("--eval-output", default="spar_sftqa_eval.jsonl", help="Eval manifest filename under --output-dir.")
     parser.add_argument("--split", default="train", help="SPAR split to read. Default: train")
-    parser.add_argument("--num-frames", type=int, default=4, help="Number of RGB frames per output sample. Default: 4")
+    parser.add_argument("--num-frames", type=int, default=8, help="Number of RGB frames per output sample. Default: 8")
     parser.add_argument("--only", choices=("both", "train", "eval"), default="both", help="Which manifests to generate. Default: both")
     parser.add_argument("--max-train", type=int, default=None, help="Optional max number of train rows for smoke tests.")
     parser.add_argument("--max-eval", type=int, default=None, help="Optional max number of eval rows for smoke tests.")
