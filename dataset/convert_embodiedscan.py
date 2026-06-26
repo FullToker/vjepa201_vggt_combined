@@ -110,11 +110,42 @@ def infer_hw(cam2img: np.ndarray) -> tuple[int, int]:
     return round(cy * 2), round(cx * 2)
 
 
+def fps_sample(views: list[dict], k: int) -> list[dict]:
+    """Farthest Point Sampling on camera positions (cam2global[:3, 3]).
+
+    Greedily selects k views maximising minimum pairwise distance in 3D
+    camera-position space.  Seed is index 0 (deterministic).
+    """
+    if len(views) <= k:
+        return views
+    positions = np.array([np.asarray(v["cam2global"], dtype=np.float64)[:3, 3]
+                          for v in views])  # (N, 3)
+    N = len(positions)
+    selected: list[int] = [0]
+    min_dists = np.full(N, np.inf)
+    min_dists[0] = 0.0
+    for _ in range(k - 1):
+        last = positions[selected[-1]]
+        dists = np.sum((positions - last) ** 2, axis=1)
+        min_dists = np.minimum(min_dists, dists)
+        min_dists[selected] = -1.0
+        selected.append(int(np.argmax(min_dists)))
+    return [views[i] for i in selected]
+
+
+def uniform_sample(views: list[dict], k: int) -> list[dict]:
+    if len(views) <= k:
+        return views
+    step = len(views) / k
+    return [views[int(i * step)] for i in range(k)]
+
+
 def convert(
     split: str,
     data_root: str | Path,
     output_jsonl: str | Path,
-    max_views: int = 4,
+    max_views: int = 8,
+    sampling: str = "fps",
 ) -> int:
     data_root    = Path(data_root)
     ann_dir      = data_root / "embodiedscan" / "embodiedscan"
@@ -173,11 +204,8 @@ def convert(
                 if target_id in v.get("visible_instance_ids", [])
             ]
             pool = visible if visible else all_views
-            if len(pool) <= max_views:
-                selected = pool
-            else:
-                step = len(pool) / max_views
-                selected = [pool[int(i * step)] for i in range(max_views)]
+            sample_fn = fps_sample if sampling == "fps" else uniform_sample
+            selected = sample_fn(pool, max_views)
 
             images: list[str]               = []
             boxes:  list[list[float] | None] = []
@@ -219,11 +247,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--data-root", required=True,
                    help="Parent dir containing embodiedscan/ and scannet/")
     p.add_argument("--output",    required=True, help="Output .jsonl path")
-    p.add_argument("--max-views", type=int, default=4,
-                   help="Max camera views per grounding entry (default: 4)")
+    p.add_argument("--max-views", type=int, default=8,
+                   help="Max camera views per grounding entry (default: 8)")
+    p.add_argument("--sampling", choices=["fps", "uniform"], default="fps",
+                   help="View selection strategy: fps (default) or uniform")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    convert(args.split, args.data_root, args.output, args.max_views)
+    convert(args.split, args.data_root, args.output, args.max_views, args.sampling)
