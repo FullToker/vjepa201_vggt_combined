@@ -150,6 +150,7 @@ def main() -> None:
             precision=tcfg.get("precision", "bf16"),
             grounding_loss_weight=gcfg.get("loss_weight", 0.1),
             grounding_pos_weight=gcfg.get("pos_weight", 5.0),
+            suppression_loss_weight=gcfg.get("suppression_loss_weight", 0.1),
             mlflow_logger=mlflow_logger,
         )
         trainer.fit(device)

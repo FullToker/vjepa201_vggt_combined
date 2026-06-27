@@ -216,6 +216,7 @@ class GVJEPATrainer:
         precision: str = "bf16",
         grounding_loss_weight: float = 0.1,
         grounding_pos_weight: float = 5.0,
+        suppression_loss_weight: float = 0.1,
         mlflow_logger=None,
     ) -> None:
         if max_steps <= 0:
@@ -237,8 +238,9 @@ class GVJEPATrainer:
         self.log_every = log_every
         self.save_every = save_every
         self.mlflow_logger = mlflow_logger
-        self.grounding_loss_weight = grounding_loss_weight
-        self.grounding_pos_weight  = grounding_pos_weight
+        self.grounding_loss_weight   = grounding_loss_weight
+        self.grounding_pos_weight    = grounding_pos_weight
+        self.suppression_loss_weight = suppression_loss_weight
         self.scaler = torch.amp.GradScaler("cuda", enabled=(precision == "fp16"))
         self.autocast_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -295,12 +297,19 @@ class GVJEPATrainer:
                 B_g, S_g = gt_masks.shape[:2]
                 gt_flat = gt_masks.reshape(B_g * S_g, patch_grid, patch_grid)
                 valid = gt_flat.reshape(B_g * S_g, -1).sum(dim=-1) > 0
+
+                logits = self.model.grounding_head(out["x_vis"], out["spatial"])
+
                 if valid.any():
-                    logits = self.model.grounding_head(out["x_vis"], out["spatial"])
                     pw = torch.tensor(self.grounding_pos_weight, device=device, dtype=logits.dtype)
                     grounding_loss = F.binary_cross_entropy_with_logits(
                         logits[valid], gt_flat[valid], pos_weight=pw
                     )
+
+                invisible = ~valid
+                if invisible.any() and self.suppression_loss_weight > 0:
+                    suppression_loss = logits[invisible].pow(2).mean()
+                    grounding_loss = grounding_loss + self.suppression_loss_weight * suppression_loss
 
             loss = self.grounding_loss_weight * grounding_loss / self.grad_accum_steps
 

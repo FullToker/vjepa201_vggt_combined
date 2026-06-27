@@ -57,9 +57,10 @@ grounding:
   ffn_mult:    4
   dropout:     0.0
   patch_grid:  37        # 518 / 14 = 37
-  loss_weight: 0.1       # grounding BCE contribution to total loss
-  pos_weight:  5.0       # BCE positive-class weight (background >> foreground)
-  batch_ratio: 5         # 1 grounding batch per 5 SPAR batches
+  loss_weight:            0.1   # grounding BCE contribution to total loss
+  pos_weight:             5.0   # BCE positive-class weight (background >> foreground)
+  suppression_loss_weight: 0.1  # MSE-to-zero weight for invisible views
+  batch_ratio: 5                # 1 grounding batch per 5 SPAR batches
 
 
 # ── Dataset (alternating: SPAR SFT ↔ EmbodiedScan grounding) ─────────────────
