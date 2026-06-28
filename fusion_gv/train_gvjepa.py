@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 import numpy as np
 import torch
 import yaml
+from accelerate import Accelerator
 
 from fusion_gv.mlflow_utils import start_mlflow_run
 from fusion_gv.gvjepa_trainer import (
@@ -102,18 +103,27 @@ def main() -> None:
         cfg["fusion"]["x_encoder_output_dim"] = args.x_encoder_output_dim
 
     tcfg = cfg["train"]
-    _set_seed(tcfg.get("seed", 42))
+    precision = tcfg.get("precision", "bf16")
+    mixed_precision = precision if precision in {"bf16", "fp16"} else "no"
+    accelerator = Accelerator(mixed_precision=mixed_precision)
 
-    device_str = tcfg.get("device", "cuda")
-    device = torch.device(device_str if torch.cuda.is_available() else "cpu")
+    _set_seed(tcfg.get("seed", 42) + accelerator.process_index)
 
     model            = build_model_from_config(cfg)
     loader           = build_loader_from_config(cfg)
     grounding_loader = build_grounding_loader_from_config(cfg)
     optimizer, scheduler = build_optimizer_and_scheduler_from_config(model, cfg)
 
+    # prepare: Accelerate handles device placement, DDP wrap, DistributedSampler
+    model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
+    if grounding_loader is not None:
+        grounding_loader = accelerator.prepare(grounding_loader)
+    if scheduler is not None:
+        scheduler = accelerator.prepare(scheduler)
+
     if args.overfit:
-        print(f"[overfit] Freezing {args.overfit_samples} samples, running {args.overfit_steps} steps...")
+        if accelerator.is_main_process:
+            print(f"[overfit] Freezing {args.overfit_samples} samples, running {args.overfit_steps} steps...")
         loader = _build_overfit_loader(loader, args.overfit_samples)
         if grounding_loader is not None:
             grounding_loader = _build_overfit_loader(grounding_loader, args.overfit_samples)
@@ -123,13 +133,16 @@ def main() -> None:
         scheduler = None
 
     output_dir = Path(tcfg["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    config_copy = output_dir / "config.yaml"
-    with open(config_copy, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
+    if accelerator.is_main_process:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config_copy = output_dir / "config.yaml"
+        with open(config_copy, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+    else:
+        config_copy = None
 
-    with start_mlflow_run(cfg) as mlflow_logger:
-        if getattr(mlflow_logger, "enabled", False):
+    with start_mlflow_run(cfg if accelerator.is_main_process else {}) as mlflow_logger:
+        if accelerator.is_main_process and getattr(mlflow_logger, "enabled", False) and config_copy:
             mlflow_logger.log_artifact(config_copy)
 
         gcfg = cfg.get("grounding", {})
@@ -147,13 +160,13 @@ def main() -> None:
             temperature=tcfg.get("temperature", 0.07),
             log_every=tcfg.get("log_every", 20),
             save_every=tcfg.get("save_every", 0),
-            precision=tcfg.get("precision", "bf16"),
             grounding_loss_weight=gcfg.get("loss_weight", 0.1),
             grounding_pos_weight=gcfg.get("pos_weight", 5.0),
             suppression_loss_weight=gcfg.get("suppression_loss_weight", 0.1),
             mlflow_logger=mlflow_logger,
+            accelerator=accelerator,
         )
-        trainer.fit(device)
+        trainer.fit()
 
 
 if __name__ == "__main__":

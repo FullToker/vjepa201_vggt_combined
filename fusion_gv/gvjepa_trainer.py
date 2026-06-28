@@ -213,16 +213,17 @@ class GVJEPATrainer:
         temperature: float = 0.07,
         log_every: int = 20,
         save_every: int = 1000,
-        precision: str = "bf16",
         grounding_loss_weight: float = 0.1,
         grounding_pos_weight: float = 5.0,
         suppression_loss_weight: float = 0.1,
         mlflow_logger=None,
+        accelerator=None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("`max_steps` must be > 0.")
-        if precision not in {"bf16", "fp16"}:
-            raise ValueError("`precision` must be 'bf16' or 'fp16'.")
+
+        from accelerate import Accelerator
+        self.accelerator = accelerator or Accelerator()
 
         self.model = model
         self.optimizer = optimizer
@@ -241,14 +242,14 @@ class GVJEPATrainer:
         self.grounding_loss_weight   = grounding_loss_weight
         self.grounding_pos_weight    = grounding_pos_weight
         self.suppression_loss_weight = suppression_loss_weight
-        self.scaler = torch.amp.GradScaler("cuda", enabled=(precision == "fp16"))
-        self.autocast_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.accelerator.is_main_process:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _save_ckpt(self, step: int, filename: str | None = None) -> Path:
+        raw_model = self.accelerator.unwrap_model(self.model)
         ckpt = {
             "step": step,
-            "model": self.model.state_dict(),
+            "model": raw_model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict() if self.scheduler else None,
         }
@@ -256,11 +257,12 @@ class GVJEPATrainer:
         torch.save(ckpt, path)
         return path
 
-    def _write_meta(self, device: torch.device) -> Path:
+    def _write_meta(self) -> Path:
         meta = {
             "torch_version": torch.__version__,
             "cuda_available": torch.cuda.is_available(),
-            "device": str(device),
+            "device": str(self.accelerator.device),
+            "num_processes": self.accelerator.num_processes,
             "hostname": platform.node(),
         }
         path = self.output_dir / "run_meta.json"
@@ -268,24 +270,22 @@ class GVJEPATrainer:
             json.dump(meta, f, indent=2)
         return path
 
-    def _grounding_step(
-        self,
-        batch: dict,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, float]:
+    def _grounding_step(self, batch: dict) -> tuple[torch.Tensor, float]:
         """Forward + grounding BCE only. Returns (loss, grounding_loss_val)."""
+        device = self.accelerator.device
         images_vggt = batch["images_vggt"].to(device, non_blocking=True)
         images_jepa = batch["images_jepa"].to(device, non_blocking=True)
 
-        with torch.autocast(device_type=device.type, dtype=self.autocast_dtype):
+        raw_model = self.accelerator.unwrap_model(self.model)
+        with self.accelerator.autocast():
             grounding_loss = torch.tensor(0.0, device=device)
             boxes_batch = batch.get("boxes")
             if (
-                self.model.grounding_head is not None
+                raw_model.grounding_head is not None
                 and boxes_batch is not None
                 and any(b is not None for b in boxes_batch)
             ):
-                patch_grid = self.model.config.grounding_patch_grid
+                patch_grid = raw_model.config.grounding_patch_grid
                 gt_masks = torch.stack([
                     boxes_to_patch_mask(b, patch_grid)
                     if b is not None
@@ -313,29 +313,26 @@ class GVJEPATrainer:
 
         return loss, grounding_loss.item()
 
-    def _spar_step(
-        self,
-        batch: dict,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, float]:
+    def _spar_step(self, batch: dict) -> tuple[torch.Tensor, float]:
         """Forward + InfoNCE only. Returns (loss, infonce_loss_val)."""
+        device = self.accelerator.device
         images_vggt = batch["images_vggt"].to(device, non_blocking=True)
         images_jepa = batch["images_jepa"].to(device, non_blocking=True)
 
-        with torch.autocast(device_type=device.type, dtype=self.autocast_dtype):
+        with self.accelerator.autocast():
             out = self.model(images_vggt, images_jepa, batch["query"], batch["target"])
             loss = bidirectional_infonce(out["pred"], out["target"], temperature=self.temperature)
             loss = loss / self.grad_accum_steps
 
         return loss, loss.item() * self.grad_accum_steps
 
-    def fit(self, device: torch.device) -> None:
+    def fit(self) -> None:
         """Run training until max_steps is reached."""
         import itertools
 
-        self.model.to(device)
         self.model.train()
-        meta_path = self._write_meta(device)
+        is_main = self.accelerator.is_main_process
+        meta_path = self._write_meta() if is_main else None
         log_path = self.output_dir / "train_log.jsonl"
 
         spar_iter = itertools.cycle(self.train_loader)
@@ -345,10 +342,9 @@ class GVJEPATrainer:
         running_loss = 0.0
         running_infonce = 0.0
         running_grounding = 0.0
-        pbar = tqdm(total=self.max_steps, desc="gvjepa-train")
+        pbar = tqdm(total=self.max_steps, desc="gvjepa-train", disable=not is_main)
 
         while step < self.max_steps:
-            # alternate: every grounding_ratio steps, use one grounding batch
             use_grounding = (
                 grounding_iter is not None
                 and step % self.grounding_ratio == 0
@@ -356,23 +352,21 @@ class GVJEPATrainer:
 
             if use_grounding:
                 batch = next(grounding_iter)
-                loss, grounding_val = self._grounding_step(batch, device)
+                loss, grounding_val = self._grounding_step(batch)
                 infonce_val = 0.0
             else:
                 batch = next(spar_iter)
-                loss, infonce_val = self._spar_step(batch, device)
+                loss, infonce_val = self._spar_step(batch)
                 grounding_val = 0.0
 
-            self.scaler.scale(loss).backward()
+            self.accelerator.backward(loss)
             running_loss      += loss.item() * self.grad_accum_steps
             running_infonce   += infonce_val
             running_grounding += grounding_val
 
             if (step + 1) % self.grad_accum_steps == 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad_norm)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                self.accelerator.clip_grad_norm_(self.model.parameters(), self.clip_grad_norm)
+                self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.scheduler is not None:
                     self.scheduler.step()
@@ -388,29 +382,31 @@ class GVJEPATrainer:
                     "grounding_loss": running_grounding / self.log_every,
                     "lr": self.optimizer.param_groups[0]["lr"],
                 }
-                with open(log_path, "a") as f:
-                    f.write(json.dumps(entry) + "\n")
-                if self.mlflow_logger is not None:
-                    self.mlflow_logger.log_metrics(
-                        {
-                            "train/loss":           entry["loss"],
-                            "train/infonce_loss":   entry["infonce_loss"],
-                            "train/grounding_loss": entry["grounding_loss"],
-                            "train/lr":             entry["lr"],
-                        },
-                        step=step,
-                    )
+                if is_main:
+                    with open(log_path, "a") as f:
+                        f.write(json.dumps(entry) + "\n")
+                    if self.mlflow_logger is not None:
+                        self.mlflow_logger.log_metrics(
+                            {
+                                "train/loss":           entry["loss"],
+                                "train/infonce_loss":   entry["infonce_loss"],
+                                "train/grounding_loss": entry["grounding_loss"],
+                                "train/lr":             entry["lr"],
+                            },
+                            step=step,
+                        )
                 running_loss = running_infonce = running_grounding = 0.0
 
-            if self.save_every and self.save_every > 0 and step % self.save_every == 0:
+            if is_main and self.save_every and self.save_every > 0 and step % self.save_every == 0:
                 self._save_ckpt(step)
 
             if step >= self.max_steps:
                 break
 
-        final_ckpt = self._save_ckpt(step, filename="final.pt")
-        if self.mlflow_logger is not None:
-            self.mlflow_logger.log_artifacts([final_ckpt, meta_path, log_path])
+        if is_main:
+            final_ckpt = self._save_ckpt(step, filename="final.pt")
+            if self.mlflow_logger is not None:
+                self.mlflow_logger.log_artifacts([final_ckpt, meta_path, log_path])
         pbar.close()
 
 
