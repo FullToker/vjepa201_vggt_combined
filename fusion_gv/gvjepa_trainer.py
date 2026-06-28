@@ -218,8 +218,6 @@ class GVJEPATrainer:
         grounding_pos_weight: float = 5.0,
         suppression_loss_weight: float = 0.1,
         mlflow_logger=None,
-        rank: int = 0,
-        world_size: int = 1,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("`max_steps` must be > 0.")
@@ -243,20 +241,14 @@ class GVJEPATrainer:
         self.grounding_loss_weight   = grounding_loss_weight
         self.grounding_pos_weight    = grounding_pos_weight
         self.suppression_loss_weight = suppression_loss_weight
-        self.rank = rank
-        self.world_size = world_size
-        self.is_main = (rank == 0)
         self.scaler = torch.amp.GradScaler("cuda", enabled=(precision == "fp16"))
         self.autocast_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
-        if self.is_main:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _save_ckpt(self, step: int, filename: str | None = None) -> Path:
-        # save raw model weights (unwrap DDP if needed)
-        raw_model = getattr(self.model, "module", self.model)
         ckpt = {
             "step": step,
-            "model": raw_model.state_dict(),
+            "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict() if self.scheduler else None,
         }
@@ -285,16 +277,15 @@ class GVJEPATrainer:
         images_vggt = batch["images_vggt"].to(device, non_blocking=True)
         images_jepa = batch["images_jepa"].to(device, non_blocking=True)
 
-        raw_model = getattr(self.model, "module", self.model)
         with torch.autocast(device_type=device.type, dtype=self.autocast_dtype):
             grounding_loss = torch.tensor(0.0, device=device)
             boxes_batch = batch.get("boxes")
             if (
-                raw_model.grounding_head is not None
+                self.model.grounding_head is not None
                 and boxes_batch is not None
                 and any(b is not None for b in boxes_batch)
             ):
-                patch_grid = raw_model.config.grounding_patch_grid
+                patch_grid = self.model.config.grounding_patch_grid
                 gt_masks = torch.stack([
                     boxes_to_patch_mask(b, patch_grid)
                     if b is not None
@@ -342,11 +333,9 @@ class GVJEPATrainer:
         """Run training until max_steps is reached."""
         import itertools
 
-        # model.to(device) already done in train_gvjepa.py before DDP wrap;
-        # calling again is a no-op but safe for single-GPU path.
         self.model.to(device)
         self.model.train()
-        meta_path = self._write_meta(device) if self.is_main else None
+        meta_path = self._write_meta(device)
         log_path = self.output_dir / "train_log.jsonl"
 
         spar_iter = itertools.cycle(self.train_loader)
@@ -399,31 +388,29 @@ class GVJEPATrainer:
                     "grounding_loss": running_grounding / self.log_every,
                     "lr": self.optimizer.param_groups[0]["lr"],
                 }
-                if self.is_main:
-                    with open(log_path, "a") as f:
-                        f.write(json.dumps(entry) + "\n")
-                    if self.mlflow_logger is not None:
-                        self.mlflow_logger.log_metrics(
-                            {
-                                "train/loss":           entry["loss"],
-                                "train/infonce_loss":   entry["infonce_loss"],
-                                "train/grounding_loss": entry["grounding_loss"],
-                                "train/lr":             entry["lr"],
-                            },
-                            step=step,
-                        )
+                with open(log_path, "a") as f:
+                    f.write(json.dumps(entry) + "\n")
+                if self.mlflow_logger is not None:
+                    self.mlflow_logger.log_metrics(
+                        {
+                            "train/loss":           entry["loss"],
+                            "train/infonce_loss":   entry["infonce_loss"],
+                            "train/grounding_loss": entry["grounding_loss"],
+                            "train/lr":             entry["lr"],
+                        },
+                        step=step,
+                    )
                 running_loss = running_infonce = running_grounding = 0.0
 
-            if self.is_main and self.save_every and self.save_every > 0 and step % self.save_every == 0:
+            if self.save_every and self.save_every > 0 and step % self.save_every == 0:
                 self._save_ckpt(step)
 
             if step >= self.max_steps:
                 break
 
-        if self.is_main:
-            final_ckpt = self._save_ckpt(step, filename="final.pt")
-            if self.mlflow_logger is not None:
-                self.mlflow_logger.log_artifacts([final_ckpt, meta_path, log_path])
+        final_ckpt = self._save_ckpt(step, filename="final.pt")
+        if self.mlflow_logger is not None:
+            self.mlflow_logger.log_artifacts([final_ckpt, meta_path, log_path])
         pbar.close()
 
 
@@ -505,16 +492,10 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     return FusionGVJEPA(model_cfg)
 
 
-def _build_loader(
-    manifests: list[str],
-    dcfg: dict,
-    batch_size: int,
-    rank: int = 0,
-    world_size: int = 1,
-) -> DataLoader:
+def _build_loader(manifests: list[str], dcfg: dict, batch_size: int) -> DataLoader:
     """Build a DataLoader from a list of manifest paths and data config."""
     from pathlib import Path
-    from torch.utils.data import ConcatDataset, DistributedSampler
+    from torch.utils.data import ConcatDataset
 
     datasets = []
     for path in manifests:
@@ -524,22 +505,13 @@ def _build_loader(
 
     ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     num_workers = dcfg.get("num_workers", 4)
-
-    if world_size > 1:
-        sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
-        shuffle = False
-    else:
-        sampler = None
-        shuffle = True
-
     loader_kwargs = {
         "batch_size": batch_size,
-        "shuffle": shuffle,
-        "sampler": sampler,
+        "shuffle": True,
         "num_workers": num_workers,
         "pin_memory": dcfg.get("pin_memory", True),
         "collate_fn": gvjepa_collate,
-        "drop_last": (world_size == 1),  # DistributedSampler handles drop_last for multi-GPU
+        "drop_last": True,
     }
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = dcfg.get("persistent_workers", True)
@@ -547,20 +519,20 @@ def _build_loader(
     return DataLoader(ds, **loader_kwargs)
 
 
-def build_loader_from_config(cfg: dict, rank: int = 0, world_size: int = 1) -> DataLoader:
+def build_loader_from_config(cfg: dict) -> DataLoader:
     """Build SPAR DataLoader from config (uses data.spar_manifests or data.train_manifests)."""
     dcfg = cfg["data"]
     manifests = dcfg.get("spar_manifests") or dcfg["train_manifests"]
-    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"], rank=rank, world_size=world_size)
+    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"])
 
 
-def build_grounding_loader_from_config(cfg: dict, rank: int = 0, world_size: int = 1) -> Optional[DataLoader]:
+def build_grounding_loader_from_config(cfg: dict) -> Optional[DataLoader]:
     """Build EmbodiedScan grounding DataLoader from config. Returns None if not configured."""
     dcfg = cfg["data"]
     manifests = dcfg.get("grounding_manifests")
     if not manifests:
         return None
-    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"], rank=rank, world_size=world_size)
+    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"])
 
 
 def build_optimizer_and_scheduler_from_config(
