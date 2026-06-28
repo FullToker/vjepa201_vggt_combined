@@ -278,8 +278,6 @@ class GVJEPATrainer:
         images_jepa = batch["images_jepa"].to(device, non_blocking=True)
 
         with torch.autocast(device_type=device.type, dtype=self.autocast_dtype):
-            out = self.model(images_vggt, images_jepa, batch["query"], batch["target"])
-
             grounding_loss = torch.tensor(0.0, device=device)
             boxes_batch = batch.get("boxes")
             if (
@@ -298,7 +296,7 @@ class GVJEPATrainer:
                 gt_flat = gt_masks.reshape(B_g * S_g, patch_grid, patch_grid)
                 valid = gt_flat.reshape(B_g * S_g, -1).sum(dim=-1) > 0
 
-                logits = self.model.grounding_head(out["x_vis"], out["spatial"])
+                logits = self.model.forward_grounding(images_vggt, images_jepa, batch["query"])
 
                 if valid.any():
                     pw = torch.tensor(self.grounding_pos_weight, device=device, dtype=logits.dtype)
