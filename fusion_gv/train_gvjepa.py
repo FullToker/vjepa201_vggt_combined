@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import yaml
 
 from fusion_gv.mlflow_utils import start_mlflow_run
@@ -28,6 +30,20 @@ from fusion_gv.gvjepa_trainer import (
     build_model_from_config,
     build_optimizer_and_scheduler_from_config,
 )
+
+
+def _init_distributed() -> tuple[int, int, int]:
+    """Init NCCL if torchrun sets LOCAL_RANK, else single-GPU fallback.
+
+    Returns (rank, local_rank, world_size).
+    """
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank       = int(os.environ.get("RANK",       0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if world_size > 1:
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+    return rank, local_rank, world_size
 
 
 def _set_seed(seed: int) -> None:
@@ -101,19 +117,28 @@ def main() -> None:
     if args.x_encoder_output_dim is not None:
         cfg["fusion"]["x_encoder_output_dim"] = args.x_encoder_output_dim
 
+    rank, local_rank, world_size = _init_distributed()
+    is_main = (rank == 0)
+
     tcfg = cfg["train"]
-    _set_seed(tcfg.get("seed", 42))
+    _set_seed(tcfg.get("seed", 42) + rank)
 
-    device_str = tcfg.get("device", "cuda")
-    device = torch.device(device_str if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    model            = build_model_from_config(cfg)
-    loader           = build_loader_from_config(cfg)
-    grounding_loader = build_grounding_loader_from_config(cfg)
+    # build raw model first so parameter_groups() works before DDP wrapping
+    model                = build_model_from_config(cfg)
+    loader               = build_loader_from_config(cfg, rank=rank, world_size=world_size)
+    grounding_loader     = build_grounding_loader_from_config(cfg, rank=rank, world_size=world_size)
     optimizer, scheduler = build_optimizer_and_scheduler_from_config(model, cfg)
 
+    model.to(device)
+    if world_size > 1:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+
     if args.overfit:
-        print(f"[overfit] Freezing {args.overfit_samples} samples, running {args.overfit_steps} steps...")
+        if is_main:
+            print(f"[overfit] Freezing {args.overfit_samples} samples, running {args.overfit_steps} steps...")
         loader = _build_overfit_loader(loader, args.overfit_samples)
         if grounding_loader is not None:
             grounding_loader = _build_overfit_loader(grounding_loader, args.overfit_samples)
@@ -123,13 +148,17 @@ def main() -> None:
         scheduler = None
 
     output_dir = Path(tcfg["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    config_copy = output_dir / "config.yaml"
-    with open(config_copy, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
+    if is_main:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config_copy = output_dir / "config.yaml"
+        with open(config_copy, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+    else:
+        config_copy = None
 
-    with start_mlflow_run(cfg) as mlflow_logger:
-        if getattr(mlflow_logger, "enabled", False):
+    # only rank-0 talks to MLflow; other ranks get a no-op logger
+    with start_mlflow_run(cfg if is_main else {}) as mlflow_logger:
+        if is_main and getattr(mlflow_logger, "enabled", False) and config_copy:
             mlflow_logger.log_artifact(config_copy)
 
         gcfg = cfg.get("grounding", {})
@@ -152,6 +181,8 @@ def main() -> None:
             grounding_pos_weight=gcfg.get("pos_weight", 5.0),
             suppression_loss_weight=gcfg.get("suppression_loss_weight", 0.1),
             mlflow_logger=mlflow_logger,
+            rank=rank,
+            world_size=world_size,
         )
         trainer.fit(device)
 
