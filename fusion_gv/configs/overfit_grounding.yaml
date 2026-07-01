@@ -83,7 +83,7 @@ train:
   seed:      42
   device:    cuda
   precision: bf16
-  output_dir: ./outputs/overfit_grounding
+  output_dir: ./outputs/overfit_grounding_2data
 
   batch_size:                  32
   gradient_accumulation_steps: 1
