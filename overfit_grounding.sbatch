@@ -17,6 +17,7 @@ mkdir -p "$ROOT/logs"
 
 srun singularity exec \
     --nv \
+    --env-file $ROOT/.env/hf.env \
     -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
