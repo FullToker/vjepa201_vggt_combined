@@ -113,14 +113,24 @@ class GVJEPADataset(Dataset):
         "target"  : text target string
     """
 
-    def __init__(self, manifest_path: str | Path) -> None:
+    def __init__(self, manifest_path: str | Path, num_frames: int | None = None) -> None:
         self.manifest_path = Path(manifest_path)
+        self.num_frames = num_frames
         if not self.manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found: {self.manifest_path}")
         with open(self.manifest_path, encoding="utf-8") as f:
             self.samples = [json.loads(line) for line in f if line.strip()]
         if not self.samples:
             raise ValueError(f"Empty manifest: {self.manifest_path}")
+        if num_frames is not None:
+            before = len(self.samples)
+            self.samples = [
+                s for s in self.samples
+                if len(s.get("images", [s.get("image")])) >= num_frames
+            ]
+            dropped = before - len(self.samples)
+            if dropped:
+                print(f"[GVJEPADataset] {self.manifest_path.name}: dropped {dropped}/{before} samples with <{num_frames} frames")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -136,6 +146,9 @@ class GVJEPADataset(Dataset):
             image_paths = [row["image"]]
         else:
             raise ValueError(f"Row {idx} must have 'images' or 'image'.")
+
+        if self.num_frames is not None:
+            image_paths = image_paths[: self.num_frames]
 
         return {
             "image_paths": image_paths,
@@ -493,11 +506,12 @@ def _build_loader(manifests: list[str], dcfg: dict, batch_size: int) -> DataLoad
     from pathlib import Path
     from torch.utils.data import ConcatDataset
 
+    num_frames = dcfg.get("num_frames", None)
     datasets = []
     for path in manifests:
         if not Path(path).exists():
             raise FileNotFoundError(f"Manifest not found: {path}")
-        datasets.append(GVJEPADataset(path))
+        datasets.append(GVJEPADataset(path, num_frames=num_frames))
 
     ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     num_workers = dcfg.get("num_workers", 4)
