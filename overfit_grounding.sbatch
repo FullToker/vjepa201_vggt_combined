@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/overfit_grounding_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/overfit_grounding_%j.err
 

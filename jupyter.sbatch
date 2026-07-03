@@ -22,7 +22,7 @@ echo "SSH tunnel command (run on LOCAL machine):"
 echo "  ssh -L ${PORT}:${NODE}:${PORT} ssh_bgd"
 echo ""
 echo "Then open: http://localhost:${PORT}"
-echo "============================================"
+	echo "============================================"
 
 srun singularity exec \
     -H $ROOT:/home/go98qit \
