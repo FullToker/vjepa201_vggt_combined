@@ -47,9 +47,10 @@ def _build_overfit_loader(loader, n_samples: int):
         if total >= n_samples:
             break
 
+    S = collected[0]["images_vggt"].shape[1]
     fixed = {
         "images_vggt": torch.cat([b["images_vggt"] for b in collected])[:n_samples],
-        "images_jepa": torch.cat([b["images_jepa"] for b in collected])[:n_samples],
+        "images_jepa": torch.cat([b["images_jepa"] for b in collected])[:n_samples * S],
         "query":  sum([b["query"]  for b in collected], [])[:n_samples],
         "target": sum([b["target"] for b in collected], [])[:n_samples],
         "boxes":  sum([b["boxes"]  for b in collected], [])[:n_samples],
