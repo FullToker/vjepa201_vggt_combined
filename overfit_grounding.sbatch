@@ -15,6 +15,8 @@ CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 
 mkdir -p "$ROOT/logs"
 
+nvidia-smi dmon -s pucvmet -d 30 > "$ROOT/logs/gpu_monitor_${SLURM_JOB_ID}.log" 2>&1 &
+
 srun singularity exec \
     --nv \
     --env-file $ROOT/.env/hf.env \
