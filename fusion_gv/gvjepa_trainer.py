@@ -501,12 +501,11 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     return FusionGVJEPA(model_cfg)
 
 
-def _build_loader(manifests: list[str], dcfg: dict, batch_size: int) -> DataLoader:
+def _build_loader(manifests: list[str], dcfg: dict, batch_size: int, num_frames: int | None = None) -> DataLoader:
     """Build a DataLoader from a list of manifest paths and data config."""
     from pathlib import Path
     from torch.utils.data import ConcatDataset
 
-    num_frames = dcfg.get("num_frames", None)
     datasets = []
     for path in manifests:
         if not Path(path).exists():
@@ -542,7 +541,8 @@ def build_grounding_loader_from_config(cfg: dict) -> Optional[DataLoader]:
     manifests = dcfg.get("grounding_manifests")
     if not manifests:
         return None
-    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"])
+    num_frames = dcfg.get("num_frames", None)
+    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"], num_frames=num_frames)
 
 
 def build_optimizer_and_scheduler_from_config(
