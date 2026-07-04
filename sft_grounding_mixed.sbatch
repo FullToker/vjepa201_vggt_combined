@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=128G
-#SBATCH --time=72:00:00
+#SBATCH --time=122:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_grounding_mixed_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_grounding_mixed_%j.err
 
