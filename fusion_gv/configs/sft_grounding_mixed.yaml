@@ -85,14 +85,14 @@ train:
   precision: bf16
   output_dir: ./outputs/sft_grounding_mixed
 
-  batch_size:                  32
-  grounding_batch_size:        16    # grounding uses S=8 (2x SPAR's S=4) → smaller batch to keep peak VRAM safe
-  gradient_accumulation_steps: 4     # effective batch = 128 (SPAR path)
+  batch_size:                  24
+  grounding_batch_size:        12    # grounding uses S=8 (2x SPAR's S=4) → smaller batch to keep peak VRAM safe
+  gradient_accumulation_steps: 4     # effective batch = 96 (SPAR path, was 128)
 
-  max_steps:     50000    # reverted: batch_size=64 OOM'd on grounding branch (S=8)
+  max_steps:     65000    # scaled up: batch_size 32→24 (×0.75) → steps up to keep total samples seen
   clip_grad_norm: 1.0
   log_every:     50
-  save_every:    5000
+  save_every:    6500
 
   learning_rate: 5.0e-5
   min_lr:        1.0e-6
