@@ -401,6 +401,16 @@ class GVJEPATrainer:
             running_infonce   += infonce_val
             running_grounding += grounding_val
 
+            if step % 10 == 0:
+                allocated_gb = torch.cuda.memory_allocated(self.accelerator.device) / 1e9
+                reserved_gb = torch.cuda.memory_reserved(self.accelerator.device) / 1e9
+                kind = "grounding" if use_grounding else "spar"
+                print(
+                    f"[mem] rank={self.accelerator.process_index} step={step} kind={kind} "
+                    f"allocated={allocated_gb:.2f}GB reserved={reserved_gb:.2f}GB",
+                    flush=True,
+                )
+
             if (step + 1) % self.grad_accum_steps == 0:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.clip_grad_norm)
                 self.optimizer.step()
