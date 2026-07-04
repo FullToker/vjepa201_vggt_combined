@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 import numpy as np
 import torch
 import yaml
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
 from fusion_gv.mlflow_utils import start_mlflow_run
 from fusion_gv.gvjepa_trainer import (
@@ -106,7 +106,11 @@ def main() -> None:
     tcfg = cfg["train"]
     precision = tcfg.get("precision", "bf16")
     mixed_precision = precision if precision in {"bf16", "fp16"} else "no"
-    accelerator = Accelerator(mixed_precision=mixed_precision)
+    # grounding vs infonce steps use disjoint parameter subsets each iteration
+    # (see FusionGVJEPA.forward mode dispatch) — DDP needs find_unused_parameters
+    # to tolerate the varying used-parameter set across steps.
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(mixed_precision=mixed_precision, kwargs_handlers=[ddp_kwargs])
 
     _set_seed(tcfg.get("seed", 42) + accelerator.process_index)
 
