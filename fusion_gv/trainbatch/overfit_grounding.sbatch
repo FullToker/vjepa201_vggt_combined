@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=overfit_grounding
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
 #SBATCH --time=12:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/overfit_grounding_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/overfit_grounding_%j.err
@@ -24,7 +24,8 @@ srun singularity exec \
     -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
-    python fusion_gv/train_gvjepa.py \
+    accelerate launch --multi_gpu --num_processes 2 \
+        fusion_gv/train_gvjepa.py \
         --config fusion_gv/configs/overfit_grounding.yaml \
         --overfit \
         --overfit-samples 32 \
