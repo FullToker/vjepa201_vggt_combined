@@ -21,6 +21,7 @@ srun singularity exec \
     --nv \
     --env-file $ROOT/.env/hf.env \
     --env MLFLOW_ALLOW_FILE_STORE=true \
+    --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \

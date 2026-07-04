@@ -566,7 +566,8 @@ def build_grounding_loader_from_config(cfg: dict) -> Optional[DataLoader]:
     if not manifests:
         return None
     num_frames = dcfg.get("grounding_num_frames", dcfg.get("num_frames"))
-    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"], num_frames=num_frames)
+    batch_size = cfg["train"].get("grounding_batch_size", cfg["train"]["batch_size"])
+    return _build_loader(manifests, dcfg, batch_size, num_frames=num_frames)
 
 
 def build_optimizer_and_scheduler_from_config(

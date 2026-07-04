@@ -86,7 +86,8 @@ train:
   output_dir: ./outputs/sft_grounding_mixed
 
   batch_size:                  32
-  gradient_accumulation_steps: 4     # effective batch = 128
+  grounding_batch_size:        16    # grounding uses S=8 (2x SPAR's S=4) → smaller batch to keep peak VRAM safe
+  gradient_accumulation_steps: 4     # effective batch = 128 (SPAR path)
 
   max_steps:     50000    # reverted: batch_size=64 OOM'd on grounding branch (S=8)
   clip_grad_norm: 1.0
