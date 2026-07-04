@@ -33,6 +33,7 @@ Usage
 
 from __future__ import annotations
 
+import gc
 import json
 import platform
 from pathlib import Path
@@ -407,7 +408,16 @@ class GVJEPATrainer:
                 kind = "grounding" if use_grounding else "spar"
                 print(
                     f"[mem] rank={self.accelerator.process_index} step={step} kind={kind} "
-                    f"allocated={allocated_gb:.2f}GB reserved={reserved_gb:.2f}GB",
+                    f"pre-gc  allocated={allocated_gb:.2f}GB reserved={reserved_gb:.2f}GB",
+                    flush=True,
+                )
+                gc.collect()
+                torch.cuda.empty_cache()
+                allocated_gb2 = torch.cuda.memory_allocated(self.accelerator.device) / 1e9
+                reserved_gb2 = torch.cuda.memory_reserved(self.accelerator.device) / 1e9
+                print(
+                    f"[mem] rank={self.accelerator.process_index} step={step} kind={kind} "
+                    f"post-gc allocated={allocated_gb2:.2f}GB reserved={reserved_gb2:.2f}GB",
                     flush=True,
                 )
 
