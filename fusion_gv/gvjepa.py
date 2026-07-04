@@ -406,15 +406,30 @@ class FusionGVJEPA(nn.Module):
         images_vggt: torch.Tensor,
         images_jepa: torch.Tensor,
         queries: list[str],
-        targets: list[str],
+        targets: list[str] | None = None,
+        mode: str = "infonce",
     ) -> Dict[str, torch.Tensor]:
-        """Full forward pass returning pred/target embeddings for InfoNCE loss.
+        """Full forward pass — single entry point so DDP always sees the same
+        callable regardless of which branch (InfoNCE vs grounding) runs.
+
+        Args:
+            mode: "infonce" (default) returns pred/target embeddings.
+                  "grounding" returns spatial attention logits instead
+                  (requires grounding_enabled=True); `targets` is ignored.
 
         Returns:
-            {"pred": (B, D_shared), "target": (B, D_shared),
-             "x_vis": (B, S, h), "spatial": (B, S, P, D_f)}
+            mode="infonce":   {"pred": (B, D_shared), "target": (B, D_shared),
+                                "x_vis": (B, S, h), "spatial": (B, S, P, D_f)}
+            mode="grounding": {"grounding_logits": (B*S, patch_grid, patch_grid)}
         """
         x_vis, pooled, spatial = self._run_predictor(images_vggt, images_jepa, queries)
+
+        if mode == "grounding":
+            if self.grounding_head is None:
+                raise RuntimeError("grounding_enabled=False; set it in GVJEPAConfig.")
+            logits = self.grounding_head(x_vis, spatial)
+            return {"grounding_logits": logits}
+
         pred = self.pred_proj(pooled)
         target = self.encode_target(targets, images_vggt.device)
         return {"pred": pred, "target": target, "x_vis": x_vis, "spatial": spatial}

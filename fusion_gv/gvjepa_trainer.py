@@ -332,7 +332,8 @@ class GVJEPATrainer:
                 gt_flat = gt_masks.reshape(B_g * S_g, patch_grid, patch_grid)
                 valid = gt_flat.reshape(B_g * S_g, -1).sum(dim=-1) > 0
 
-                logits = self.model.forward_grounding(images_vggt, images_jepa, batch["query"])
+                out = self.model(images_vggt, images_jepa, batch["query"], mode="grounding")
+                logits = out["grounding_logits"]
 
                 if valid.any():
                     pw = torch.tensor(self.grounding_pos_weight, device=device, dtype=logits.dtype)
