@@ -140,12 +140,38 @@ def uniform_sample(views: list[dict], k: int) -> list[dict]:
     return [views[int(i * step)] for i in range(k)]
 
 
+def sample_view_groups(
+    pool: list[dict],
+    max_views: int,
+    num_groups: int,
+    sampling: str,
+) -> list[list[dict]]:
+    """Partition pool into up to `num_groups` disjoint view groups of size `max_views`.
+
+    Each group is drawn (without replacement across groups) from the shrinking
+    remainder, so the same view never appears twice for one VG entry. Stops
+    early if the pool runs out before `num_groups` groups are formed.
+    """
+    sample_fn = fps_sample if sampling == "fps" else uniform_sample
+    remaining = list(pool)
+    groups: list[list[dict]] = []
+    for _ in range(num_groups):
+        if not remaining:
+            break
+        selected = sample_fn(remaining, max_views)
+        groups.append(selected)
+        selected_ids = {id(v) for v in selected}
+        remaining = [v for v in remaining if id(v) not in selected_ids]
+    return groups
+
+
 def convert(
     split: str,
     data_root: str | Path,
     output_jsonl: str | Path,
     max_views: int = 8,
     sampling: str = "fps",
+    num_groups: int = 4,
 ) -> int:
     data_root    = Path(data_root)
     ann_dir      = data_root / "embodiedscan" / "embodiedscan"
@@ -203,32 +229,36 @@ def convert(
                 v for v in all_views
                 if target_id in v.get("visible_instance_ids", [])
             ]
-            pool = visible if visible else all_views
-            sample_fn = fps_sample if sampling == "fps" else uniform_sample
-            selected = sample_fn(pool, max_views)
+            pool   = visible if visible else all_views
+            groups = sample_view_groups(pool, max_views, num_groups, sampling)
 
-            images: list[str]               = []
-            boxes:  list[list[float] | None] = []
+            wrote_any = False
+            for selected in groups:
+                images: list[str]               = []
+                boxes:  list[list[float] | None] = []
 
-            for v in selected:
-                cam2global = np.asarray(v["cam2global"], dtype=np.float64)
-                box        = project_box(corners_w, cam2global, cam2img, orig_hw, axis_align_matrix)
-                images.append(str(data_root / v["img_path"]))
-                boxes.append(box)
+                for v in selected:
+                    cam2global = np.asarray(v["cam2global"], dtype=np.float64)
+                    box        = project_box(corners_w, cam2global, cam2img, orig_hw, axis_align_matrix)
+                    images.append(str(data_root / v["img_path"]))
+                    boxes.append(box)
 
-            if not any(b is not None for b in boxes):
+                if not any(b is not None for b in boxes):
+                    continue
+
+                out.write(json.dumps({
+                    "images":    images,
+                    "query":     text,
+                    "target":    text,
+                    "task_type": "grounding",
+                    "boxes":     boxes,
+                    "source":    "embodiedscan",
+                }) + "\n")
+                rows_written += 1
+                wrote_any = True
+
+            if not wrote_any:
                 skipped_invisible += 1
-                continue
-
-            out.write(json.dumps({
-                "images":    images,
-                "query":     text,
-                "target":    text,
-                "task_type": "grounding",
-                "boxes":     boxes,
-                "source":    "embodiedscan",
-            }) + "\n")
-            rows_written += 1
 
     print(
         f"[{split}] wrote {rows_written} rows  "
@@ -251,9 +281,11 @@ def _parse_args() -> argparse.Namespace:
                    help="Max camera views per grounding entry (default: 8)")
     p.add_argument("--sampling", choices=["fps", "uniform"], default="fps",
                    help="View selection strategy: fps (default) or uniform")
+    p.add_argument("--num-groups", type=int, default=4,
+                   help="Max disjoint view-groups (rows) per VG entry (default: 4)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    convert(args.split, args.data_root, args.output, args.max_views, args.sampling)
+    convert(args.split, args.data_root, args.output, args.max_views, args.sampling, args.num_groups)

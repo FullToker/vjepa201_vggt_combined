@@ -85,13 +85,13 @@ train:
   precision: bf16
   output_dir: ./outputs/sft_grounding_mixed
 
-  batch_size:                  32
-  gradient_accumulation_steps: 4     # effective batch = 128
+  batch_size:                  64
+  gradient_accumulation_steps: 2     # effective batch = 128 (unchanged)
 
-  max_steps:     50000
+  max_steps:     25000    # halved: batch_size doubled → same total samples
   clip_grad_norm: 1.0
   log_every:     50
-  save_every:    5000
+  save_every:    2500     # halved to match max_steps, same checkpoint density
 
   learning_rate: 5.0e-5
   min_lr:        1.0e-6
