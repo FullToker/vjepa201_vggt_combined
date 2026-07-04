@@ -118,25 +118,48 @@ class GVJEPADataset(Dataset):
         self.num_frames = num_frames
         if not self.manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found: {self.manifest_path}")
-        with open(self.manifest_path, encoding="utf-8") as f:
-            self.samples = [json.loads(line) for line in f if line.strip()]
-        if not self.samples:
+
+        # Index-only pass: record byte offsets, never retain parsed rows.
+        # Keeps per-process memory to O(N) ints instead of O(N) dicts, so
+        # DataLoader workers (fork'd copies) don't each balloon to a full
+        # copy of a multi-million-row parsed manifest.
+        self._offsets: list[int] = []
+        before = 0
+        with open(self.manifest_path, "rb") as f:
+            offset = f.tell()
+            for raw in f:
+                if raw.strip():
+                    before += 1
+                    keep = True
+                    if num_frames is not None:
+                        row = json.loads(raw)
+                        n_imgs = len(row.get("images", [row.get("image")]))
+                        keep = n_imgs >= num_frames
+                    if keep:
+                        self._offsets.append(offset)
+                offset = f.tell()
+        if not self._offsets:
             raise ValueError(f"Empty manifest: {self.manifest_path}")
-        if num_frames is not None:
-            before = len(self.samples)
-            self.samples = [
-                s for s in self.samples
-                if len(s.get("images", [s.get("image")])) >= num_frames
-            ]
-            dropped = before - len(self.samples)
-            if dropped:
-                print(f"[GVJEPADataset] {self.manifest_path.name}: dropped {dropped}/{before} samples with <{num_frames} frames")
+        dropped = before - len(self._offsets)
+        if dropped:
+            print(f"[GVJEPADataset] {self.manifest_path.name}: dropped {dropped}/{before} samples with <{num_frames} frames")
+
+        # Opened lazily, once per worker process, on first __getitem__ call —
+        # never before DataLoader forks workers (a pre-fork fd would share
+        # its seek position across processes and race).
+        self._fh = None
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self._offsets)
+
+    def _read_row(self, idx: int) -> Dict[str, Any]:
+        if self._fh is None:
+            self._fh = open(self.manifest_path, "rb")
+        self._fh.seek(self._offsets[idx])
+        return json.loads(self._fh.readline())
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        row = self.samples[idx]
+        row = self._read_row(idx)
         if "target" not in row:
             raise KeyError(f"Row {idx} missing required 'target' field.")
 
