@@ -565,7 +565,7 @@ def build_grounding_loader_from_config(cfg: dict) -> Optional[DataLoader]:
     manifests = dcfg.get("grounding_manifests")
     if not manifests:
         return None
-    num_frames = dcfg.get("num_frames", None)
+    num_frames = dcfg.get("grounding_num_frames", dcfg.get("num_frames"))
     return _build_loader(manifests, dcfg, cfg["train"]["batch_size"], num_frames=num_frames)
 
 
