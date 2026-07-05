@@ -366,15 +366,23 @@ class GVJEPATrainer:
 
     def fit(self) -> None:
         """Run training until max_steps is reached."""
-        import itertools
+
+        def _infinite(loader):
+            # NOTE: itertools.cycle caches every yielded batch to replay after
+            # the first pass — since accelerator.prepare() already places
+            # batches on GPU, that cache retains one GPU batch per step
+            # forever. Re-iterate the loader instead (also reshuffles each
+            # epoch since shuffle=True).
+            while True:
+                yield from loader
 
         self.model.train()
         is_main = self.accelerator.is_main_process
         meta_path = self._write_meta() if is_main else None
         log_path = self.output_dir / "train_log.jsonl"
 
-        spar_iter = itertools.cycle(self.train_loader)
-        grounding_iter = itertools.cycle(self.grounding_loader) if self.grounding_loader else None
+        spar_iter = _infinite(self.train_loader)
+        grounding_iter = _infinite(self.grounding_loader) if self.grounding_loader else None
 
         step = 0
         running_loss = 0.0
