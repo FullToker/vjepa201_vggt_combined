@@ -402,7 +402,7 @@ class GVJEPATrainer:
             running_infonce   += infonce_val
             running_grounding += grounding_val
 
-            if step % 10 == 0:
+            if step % 7 == 0 or step % 15 == 0:
                 allocated_gb = torch.cuda.memory_allocated(self.accelerator.device) / 1e9
                 reserved_gb = torch.cuda.memory_reserved(self.accelerator.device) / 1e9
                 kind = "grounding" if use_grounding else "spar"
@@ -420,6 +420,19 @@ class GVJEPATrainer:
                     f"post-gc allocated={allocated_gb2:.2f}GB reserved={reserved_gb2:.2f}GB",
                     flush=True,
                 )
+
+                from collections import Counter
+                live: Counter = Counter()
+                for obj in gc.get_objects():
+                    if torch.is_tensor(obj) and obj.is_cuda:
+                        live[(tuple(obj.shape), str(obj.dtype))] += obj.numel() * obj.element_size()
+                top = sorted(live.items(), key=lambda kv: -kv[1])[:10]
+                for shape_dtype, nbytes in top:
+                    print(
+                        f"[mem-shape] rank={self.accelerator.process_index} step={step} "
+                        f"kind={kind} shape={shape_dtype} total={nbytes / 1e9:.3f}GB",
+                        flush=True,
+                    )
 
             if (step + 1) % self.grad_accum_steps == 0:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.clip_grad_norm)
