@@ -27,8 +27,23 @@ if [[ -n "${HF_TOKEN:-}" ]]; then
 fi
 
 echo "Downloading InternSpatial video_*.parquet (multi-view) to: ${OUTPUT_DIR}"
-hf download "$REPO_ID" \
-  --repo-type dataset \
-  --include "video_*.parquet" \
-  --local-dir "$OUTPUT_DIR" \
-  "${TOKEN_ARG[@]}"
+
+MAX_RETRY=30
+for i in $(seq 1 $MAX_RETRY); do
+  echo "=== Attempt $i at $(date) ==="
+  if hf download "$REPO_ID" \
+    --repo-type dataset \
+    --include "video_*.parquet" \
+    --local-dir "$OUTPUT_DIR" \
+     --max-workers 2 \
+    "${TOKEN_ARG[@]}"; then
+    echo "Download completed successfully at $(date)"
+    exit 0
+  else
+    echo "Attempt $i failed at $(date), retrying in 30s..."
+    sleep 30
+  fi
+done
+
+echo "All $MAX_RETRY attempts failed." >&2
+exit 1
