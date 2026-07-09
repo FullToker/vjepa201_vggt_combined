@@ -17,7 +17,6 @@ SIF="srun singularity exec \
     $CONTAINER"
 
 mkdir -p "$ROOT/logs"
-source "$ROOT/.env/hf.env"
 
 echo "Start download at $(date)"
 
