@@ -30,4 +30,5 @@ hf download "$REPO_ID" \
   --repo-type dataset \
   --include "video_*.parquet" \
   --local-dir "$OUTPUT_DIR" \
+  --max-workers 1 \
   "${TOKEN_ARG[@]}"
