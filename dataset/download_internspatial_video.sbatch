@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=dl_internspatial_video
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
 #SBATCH --time=48:00:00
 #SBATCH --partition=geo
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/dl_internspatial_video_%j.out
