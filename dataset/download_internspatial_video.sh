@@ -9,6 +9,7 @@
 #
 # Dataset page: https://huggingface.co/datasets/Yeshenglong/InternSpatial
 set -euo pipefail
+export HF_HUB_DOWNLOAD_TIMEOUT=60 
 
 REPO_ID="Yeshenglong/InternSpatial"
 OUTPUT_DIR="${1:-./source_data/internspatial}"
