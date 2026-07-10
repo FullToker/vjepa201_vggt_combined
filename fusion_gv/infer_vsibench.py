@@ -74,16 +74,37 @@ def _save_grounding(image_paths: List[str], heatmap: np.ndarray, out_dir: Path, 
 class VSIBenchDataset(Dataset):
     def __init__(self, manifest_path: str | Path) -> None:
         self.manifest_path = Path(manifest_path)
-        with open(self.manifest_path, encoding="utf-8") as f:
-            self.rows = [json.loads(line) for line in f if line.strip()]
-        if not self.rows:
+
+        # Index-only pass: record byte offsets, never retain parsed rows.
+        # Keeps per-process memory to O(N) ints instead of O(N) dicts, so
+        # DataLoader workers (fork'd copies) don't each balloon to a full
+        # copy of a multi-million-row parsed manifest (see GVJEPADataset).
+        self._offsets: list[int] = []
+        with open(self.manifest_path, "rb") as f:
+            offset = f.tell()
+            for raw in f:
+                if raw.strip():
+                    self._offsets.append(offset)
+                offset = f.tell()
+        if not self._offsets:
             raise ValueError(f"Empty manifest: {self.manifest_path}")
 
+        # Opened lazily, once per worker process, on first __getitem__ call --
+        # never before DataLoader forks workers (a pre-fork fd would share
+        # its seek position across processes and race).
+        self._fh = None
+
     def __len__(self) -> int:
-        return len(self.rows)
+        return len(self._offsets)
+
+    def _read_row(self, idx: int) -> Dict[str, Any]:
+        if self._fh is None:
+            self._fh = open(self.manifest_path, "rb")
+        self._fh.seek(self._offsets[idx])
+        return json.loads(self._fh.readline())
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        row = self.rows[idx]
+        row = self._read_row(idx)
         return {
             "image_paths": row["images"],
             "query": row.get("query", ""),
