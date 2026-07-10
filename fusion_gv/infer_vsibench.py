@@ -258,6 +258,7 @@ def main() -> None:
                     "id": batch["id"][i],
                     "query": queries[i],
                     "question_type": qtype,
+                    "candidates": candidates_by_row[i],
                     "target": target_text,
                     "pred": pred_text,
                     "correct": is_correct,
