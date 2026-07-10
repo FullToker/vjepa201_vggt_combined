@@ -54,9 +54,9 @@ inference:
   # + dataset/make_vsibench_manifest.py) -- fixed 8-frame `images` list per
   # sample, no video decode happens at inference time.
   manifest: ./data/vsibench_manifest.jsonl
-  output_dir: ./outputs/inference/vsibench
+  output_dir: ./outputs/inference/vsibench_8select_mixedsft
 
-  checkpoint: null   # null -> use train.output_dir latest step_*.pt
+  checkpoint: ./outputs/sft_grounding_mixed/step_0065000.pt   # null -> use train.output_dir latest step_*.pt
 
   mode: auto              # auto, select, multichoices
   save_grounding: true    # write heatmap.npy + per-frame overlay_{k}.jpg
