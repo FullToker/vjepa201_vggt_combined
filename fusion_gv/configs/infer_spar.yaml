@@ -40,25 +40,40 @@ model:
   y_encoder_lr_multiplier: 0.05
   hf_cache_dir: ./ckpts
 
+grounding:
+  enabled:     true
+  num_layers:  3
+  num_heads:   8
+  ffn_mult:    4
+  dropout:     0.0
+  patch_grid:  37
+
 # Used only when --checkpoint is omitted. If this is a directory, the latest
 # step_*.pt is used automatically.
 train:
-  output_dir: ./outputs/sft_vv_concat
+  output_dir: ./outputs/sft_grounding_mixed
   device: cuda
   precision: bf16
 
 inference:
   # SPAR eval format: {"images": [...], "query": "...", "candidates": [...], "target": "..."}
+  # Both key styles kept: infer_gvjepa.py reads input_jsonl/output_jsonl/metrics_output,
+  # infer_vsibench.py reads manifest/output_dir (used for the sft_grounding_mixed
+  # checkpoint sanity check against SPAR's own eval set).
   input_jsonl: ./data/spar_eva.jsonl
+  manifest: ./data/spar_eva.jsonl
   input_root: .
   output_jsonl: ./outputs/inference/spar_sftmixed/spar_predictions.jsonl
   metrics_output: ./outputs/inference/spar_sftmixed/spar_metrics.json
+  output_dir: ./outputs/inference/spar_sanity_check
 
   # null means: use latest step_*.pt under train.output_dir.
   # Can also be a specific checkpoint path or checkpoint directory.
-  checkpoint: null
+  checkpoint: ./outputs/sft_grounding_mixed/step_0065000.pt
 
   mode: auto                    # auto, embedding, select, multichoices
+  save_grounding: true
+  heatmap_alpha: 0.35
   # SPAR rows have fixed 4-image inputs, so batching improves GPU utilization.
   # If fusion_gv OOMs, try 4; for vjepa-only, try 16 or 32.
   batch_size: 8
