@@ -17,9 +17,9 @@
 set -euo pipefail
 
 QA_URL="https://raw.githubusercontent.com/facebookresearch/open-eqa/main/data/open-eqa-v0.json"
-HM3D_FRAMES_URL="https://www.dropbox.com/scl/fi/t79gsjqlan8dneg7o63sw/open-eqa-hm3d-frames-v0.tgz?rlkey=1iuukwy2g3f5t06q4a3mxqobm&dl=1"
+HM3D_FRAMES_URL="https://www.dropbox.com/scl/fi/t79gsjqlan8dneg7o63sw/open-eqa-hm3d-frames-v0.tgz?rlkey=1iuukwy2g3f5t06q4a3mxqobm"
 HM3D_FRAMES_MD5="286aa5d2fda99f4ed1567ae212998370"
-HM3D_STATES_URL="https://www.dropbox.com/scl/fi/wg1uj1gvr4tkcz9aq3tzb/open-eqa-hm3d-states-v0.tgz?rlkey=i69chnpib8ui4cfabxa3iy9oj&dl=1"
+HM3D_STATES_URL="https://www.dropbox.com/scl/fi/wg1uj1gvr4tkcz9aq3tzb/open-eqa-hm3d-states-v0.tgz?rlkey=i69chnpib8ui4cfabxa3iy9oj"
 
 OUTPUT_DIR="${1:-./source_data/openeqa}"
 MANIFEST_OUT="${2:-./data/openeqa_manifest.jsonl}"
@@ -33,7 +33,7 @@ echo "==> Downloading QA file -> ${OUTPUT_DIR}/open-eqa-v0.json"
 if [[ -f "$OUTPUT_DIR/open-eqa-v0.json" ]]; then
   echo "  skip (exists)"
 else
-  curl -fL "$QA_URL" -o "$OUTPUT_DIR/open-eqa-v0.json"
+  wget -O "$OUTPUT_DIR/open-eqa-v0.json" "$QA_URL"
 fi
 
 echo "==> Downloading HM3D RGB frames (~12GB)"
@@ -41,11 +41,12 @@ if [[ -d "$OUTPUT_DIR/frames/hm3d-v0" ]]; then
   echo "  skip (already extracted): frames/hm3d-v0"
 else
   TGZ="$OUTPUT_DIR/open-eqa-hm3d-frames-v0.tgz"
-  curl -fL "$HM3D_FRAMES_URL" -o "$TGZ"
+  wget -O "$TGZ" "$HM3D_FRAMES_URL"
   echo "  verifying md5..."
   actual_md5="$(md5sum "$TGZ" | cut -d' ' -f1)"
   if [[ "$actual_md5" != "$HM3D_FRAMES_MD5" ]]; then
-    echo "  WARNING: md5 mismatch (expected $HM3D_FRAMES_MD5, got $actual_md5) -- continuing anyway" >&2
+    echo "  ERROR: md5 mismatch (expected $HM3D_FRAMES_MD5, got $actual_md5)" >&2
+    exit 1
   fi
   echo "  extracting..."
   tar -xzf "$TGZ" -C "$OUTPUT_DIR/frames"
@@ -57,7 +58,7 @@ if find "$OUTPUT_DIR/frames/hm3d-v0" -maxdepth 2 -name '*.pkl' -print -quit 2>/d
   echo "  skip (states already present)"
 else
   TGZ="$OUTPUT_DIR/open-eqa-hm3d-states-v0.tgz"
-  curl -fL "$HM3D_STATES_URL" -o "$TGZ"
+  wget -O "$TGZ" "$HM3D_STATES_URL"
   echo "  extracting..."
   tar -xzf "$TGZ" -C "$OUTPUT_DIR/frames"
   rm -f "$TGZ"
