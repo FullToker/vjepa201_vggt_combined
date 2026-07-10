@@ -45,6 +45,27 @@ from fusion_gv.gvjepa_trainer import build_model_from_config
 from fusion_gv.infer_gvjepa import _load_checkpoint, _resolve_checkpoint, _score_candidate_batch
 from fusion_gv.preprocess import preprocess
 
+# SPAR-only: --type-filter vsi-compat shortcut for row["type"] values whose
+# task semantics roughly match VSI-Bench's evaluated categories
+# (object_rel_direction / object_rel_distance / obj_appearance_order /
+# room_size / object_count). No-op for VSI-Bench manifests (no "type" field).
+SPAR_VSI_COMPAT_TYPES = [
+    "obj_spatial_relation_oo",
+    "obj_spatial_relation_oc_mv",
+    "obj_spatial_relation_oo_mv",
+    "distance_infer_center_oc",
+    "distance_infer_center_oo",
+    "distance_infer_center_oc_mv",
+    "distance_infer_center_oo_mv",
+    "distance_prediction_oc",
+    "distance_prediction_oo",
+    "distance_prediction_oc_mv",
+    "distance_prediction_oo_mv",
+    "appearance_order",
+    "room_size",
+    "obj_count",
+]
+
 
 def _sanitize_id(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(value))
@@ -72,7 +93,11 @@ def _save_grounding(image_paths: List[str], heatmap: np.ndarray, out_dir: Path, 
 
 
 class VSIBenchDataset(Dataset):
-    def __init__(self, manifest_path: str | Path) -> None:
+    def __init__(self, manifest_path: str | Path, type_filter: set[str] | None = None) -> None:
+        """type_filter: SPAR-only knob. Keep a row only if row["type"] is in
+        the set (rows without a "type" field are kept as-is since VSI-Bench
+        manifests don't have one). Leave None for VSI-Bench runs -- no-op.
+        """
         self.manifest_path = Path(manifest_path)
 
         # Index-only pass: record byte offsets, never retain parsed rows.
@@ -84,7 +109,12 @@ class VSIBenchDataset(Dataset):
             offset = f.tell()
             for raw in f:
                 if raw.strip():
-                    self._offsets.append(offset)
+                    keep = True
+                    if type_filter is not None:
+                        row_type = json.loads(raw).get("type")
+                        keep = row_type is None or row_type in type_filter
+                    if keep:
+                        self._offsets.append(offset)
                 offset = f.tell()
         if not self._offsets:
             raise ValueError(f"Empty manifest: {self.manifest_path}")
@@ -160,6 +190,11 @@ def main() -> None:
     parser.add_argument("--precision", choices=("fp32", "bf16", "fp16"), default=None)
     parser.add_argument("--heatmap-alpha", type=float, default=None, help="Overlay opacity (lower = more transparent)")
     parser.add_argument("--no-grounding", action="store_true", help="Skip grounding forward + save entirely")
+    parser.add_argument(
+        "--type-filter", default=None,
+        help="SPAR-only: comma-separated row['type'] values to keep, or 'vsi-compat' for the "
+             "built-in VSI-Bench-comparable preset. Unset -> no filtering (VSI-Bench default).",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -173,6 +208,11 @@ def main() -> None:
     mode = args.mode or icfg.get("mode", "auto")
     heatmap_alpha = args.heatmap_alpha if args.heatmap_alpha is not None else float(icfg.get("heatmap_alpha", 0.35))
     save_grounding = (not args.no_grounding) and icfg.get("save_grounding", True)
+    type_filter_str = args.type_filter or icfg.get("type_filter")
+    if type_filter_str == "vsi-compat":
+        type_filter = set(SPAR_VSI_COMPAT_TYPES)
+    else:
+        type_filter = set(type_filter_str.split(",")) if type_filter_str else None
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
 
@@ -195,7 +235,7 @@ def main() -> None:
 
     need_vggt = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv") == "fusion_gv"
 
-    dataset = VSIBenchDataset(manifest_path)
+    dataset = VSIBenchDataset(manifest_path, type_filter=type_filter)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -215,6 +255,8 @@ def main() -> None:
     total = 0
     evaluated = 0
     correct = 0
+    sim_sum = 0.0
+    sim_count = 0
     per_type_total: Dict[str, int] = {}
     per_type_correct: Dict[str, int] = {}
     autocast_enabled = dtype is not None and device.type == "cuda"
@@ -248,6 +290,22 @@ def main() -> None:
                 model, pred_embeddings, scoring_candidates, device, include_scores=False
             )
 
+            # No-candidate rows (most of SPAR: open-ended query->target, no MC
+            # options) can't do discriminative matching. Report pred<->target
+            # cosine sim instead, as a per-row diagnostic alignment score --
+            # NOT accuracy -- alongside the grounding heatmap (saved for every
+            # row unconditionally below).
+            sim_scores: List[float | None] = [None] * B
+            unscored_idx = [i for i in range(B) if not should_score[i]]
+            if unscored_idx:
+                unscored_targets = [batch["target"][i] for i in unscored_idx]
+                target_emb = model.encode_target(unscored_targets, device)
+                pred_sub = torch.nn.functional.normalize(pred_embeddings[unscored_idx].float(), dim=-1)
+                target_sub = torch.nn.functional.normalize(target_emb.float(), dim=-1)
+                sims = (pred_sub * target_sub).sum(dim=-1)
+                for j, i in enumerate(unscored_idx):
+                    sim_scores[i] = float(sims[j].item())
+
             # CPU-only work (numpy/PIL, no GPU involvement): candidate bookkeeping
             # + grounding overlay rendering, runs while the next batch loads.
             for i in range(B):
@@ -269,6 +327,11 @@ def main() -> None:
                         per_type_total[qtype] = per_type_total.get(qtype, 0) + 1
                         per_type_correct[qtype] = per_type_correct.get(qtype, 0) + int(is_correct)
 
+                sim_score = sim_scores[i]
+                if sim_score is not None:
+                    sim_sum += sim_score
+                    sim_count += 1
+
                 grounding_path = None
                 if save_grounding:
                     sample_dir = grounding_dir / _sanitize_id(batch["id"][i])
@@ -283,6 +346,7 @@ def main() -> None:
                     "target": target_text,
                     "pred": pred_text,
                     "correct": is_correct,
+                    "sim_score": sim_score,
                     "image_paths": batch["image_paths"][i],
                     "grounding_path": grounding_path,
                     "checkpoint": str(checkpoint_path),
@@ -297,6 +361,8 @@ def main() -> None:
         "evaluated": evaluated,
         "correct": correct,
         "accuracy": (correct / evaluated) if evaluated else None,
+        "sim_count": sim_count,
+        "mean_sim_score": (sim_sum / sim_count) if sim_count else None,
         "per_question_type": {
             qtype: {"total": per_type_total[qtype], "correct": per_type_correct[qtype], "accuracy": per_type_accuracy[qtype]}
             for qtype in per_type_total
@@ -312,9 +378,11 @@ def main() -> None:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
     acc = "n/a" if metrics["accuracy"] is None else f"{metrics['accuracy']:.6f}"
+    sim = "n/a" if metrics["mean_sim_score"] is None else f"{metrics['mean_sim_score']:.6f}"
     print(f"wrote predictions: {predictions_path}")
     print(f"wrote metrics: {metrics_path}")
     print(f"evaluated={evaluated} correct={correct} accuracy={acc}")
+    print(f"sim_count={sim_count} mean_sim_score={sim}")
 
 
 if __name__ == "__main__":
