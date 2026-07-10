@@ -141,6 +141,7 @@ class VSIBenchDataset(Dataset):
             "target": row["target"],
             "candidates": row.get("candidates"),
             "id": row.get("id", idx),
+            "row_idx": idx,   # unique by construction (manifest line position) -- see grounding save
             "question_type": row.get("question_type"),
         }
 
@@ -148,7 +149,7 @@ class VSIBenchDataset(Dataset):
 def vsibench_collate(items: List[Dict[str, Any]], need_vggt: bool) -> Dict[str, Any]:
     vggt_list, jepa_list = [], []
     queries, targets, candidates_list = [], [], []
-    ids, qtypes, image_paths_list = [], [], []
+    ids, row_idxs, qtypes, image_paths_list = [], [], [], []
 
     for item in items:
         imgs_v, imgs_j = preprocess(item["image_paths"], need_vggt=need_vggt, need_jepa=True)
@@ -159,6 +160,7 @@ def vsibench_collate(items: List[Dict[str, Any]], need_vggt: bool) -> Dict[str, 
         targets.append(item["target"])
         candidates_list.append(item["candidates"])
         ids.append(item["id"])
+        row_idxs.append(item["row_idx"])
         qtypes.append(item["question_type"])
         image_paths_list.append(item["image_paths"])
 
@@ -172,6 +174,7 @@ def vsibench_collate(items: List[Dict[str, Any]], need_vggt: bool) -> Dict[str, 
         "target": targets,
         "candidates": candidates_list,
         "id": ids,
+        "row_idx": row_idxs,
         "question_type": qtypes,
         "image_paths": image_paths_list,
     }
@@ -334,7 +337,11 @@ def main() -> None:
 
                 grounding_path = None
                 if save_grounding:
-                    sample_dir = grounding_dir / _sanitize_id(batch["id"][i])
+                    # row_idx (manifest line position) guarantees a unique folder per
+                    # row regardless of dataset -- id alone isn't trusted (unverified
+                    # whether it's unique, e.g. across rows sharing the same scene).
+                    dir_name = f"{batch['row_idx'][i]:06d}_{_sanitize_id(batch['id'][i])}"
+                    sample_dir = grounding_dir / dir_name
                     _save_grounding(batch["image_paths"][i], grounding_heat[i], sample_dir, heatmap_alpha)
                     grounding_path = str(sample_dir.relative_to(output_dir))
 
