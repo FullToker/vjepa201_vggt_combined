@@ -27,7 +27,7 @@ def _sanitize_id(value) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--vsi-dir", default="./source_data/vsibench", help="Dir with test.jsonl")
-    parser.add_argument("--frames-dir", default=None, help="default: <vsi-dir>/frames (extract_vsibench_frames.py output)")
+    parser.add_argument("--frames-dir", default=None, help="default: <vsi-dir>/frames{num_frames}_fps (extract_vsibench_frames.py output)")
     parser.add_argument("--out", default="./data/vsibench_manifest.jsonl")
     parser.add_argument("--num-frames", type=int, default=8, help="Must match extract_vsibench_frames.py --num-frames")
     parser.add_argument(
@@ -37,7 +37,7 @@ def main() -> None:
     args = parser.parse_args()
 
     vsi_dir = Path(args.vsi_dir)
-    frames_dir = Path(args.frames_dir or vsi_dir / "frames")
+    frames_dir = Path(args.frames_dir or vsi_dir / f"frames{args.num_frames}_fps")
     src = vsi_dir / "test.jsonl"
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,11 +10,11 @@ MANIFEST_OUT="${2:-./data/vsibench_manifest.jsonl}"
 WORKERS="${3:-4}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "==> Extracting FPS-sampled frames from: ${VSI_DIR}"
+echo "==> Extracting FPS(farthest-point)-sampled frames from: ${VSI_DIR}"
 python3 "$SCRIPT_DIR/extract_vsibench_frames.py" \
   --vsi-dir "$VSI_DIR" \
-  --fps 1.0 \
   --num-frames 8 \
+  --pool-size 64 \
   --mode mc \
   --workers "$WORKERS"
 
