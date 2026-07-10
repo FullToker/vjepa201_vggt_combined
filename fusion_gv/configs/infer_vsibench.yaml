@@ -50,14 +50,17 @@ train:
   precision: bf16
 
 inference:
+  # Manifest points at pre-extracted frames (dataset/extract_vsibench_frames.py
+  # + dataset/make_vsibench_manifest.py) -- fixed 8-frame `images` list per
+  # sample, no video decode happens at inference time.
   manifest: ./data/vsibench_manifest.jsonl
   output_dir: ./outputs/inference/vsibench
 
   checkpoint: null   # null -> use train.output_dir latest step_*.pt
 
   mode: auto              # auto, select, multichoices
-  num_frames: 8            # fixed frame count per video (uniform temporal sampling)
-  save_grounding: true     # write per-sample (S,37,37) sigmoid heatmap .npy
+  save_grounding: true    # write heatmap.npy + per-frame overlay_{k}.jpg
+  heatmap_alpha: 0.35      # overlay opacity, lower = more transparent
 
   batch_size: 8
   num_workers: 8
