@@ -27,6 +27,7 @@ import argparse
 import json
 import re
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -194,6 +195,11 @@ def main() -> None:
     parser.add_argument("--heatmap-alpha", type=float, default=None, help="Overlay opacity (lower = more transparent)")
     parser.add_argument("--no-grounding", action="store_true", help="Skip grounding forward + save entirely")
     parser.add_argument(
+        "--render-workers", type=int, default=None,
+        help="Thread pool size for grounding overlay rendering (CPU-only), overlapped with the next "
+             "batch's GPU forward instead of blocking it. 0 = render synchronously (old behavior).",
+    )
+    parser.add_argument(
         "--type-filter", default=None,
         help="SPAR-only: comma-separated row['type'] values to keep, or 'vsi-compat' for the "
              "built-in VSI-Bench-comparable preset. Unset -> no filtering (VSI-Bench default).",
@@ -211,6 +217,7 @@ def main() -> None:
     mode = args.mode or icfg.get("mode", "auto")
     heatmap_alpha = args.heatmap_alpha if args.heatmap_alpha is not None else float(icfg.get("heatmap_alpha", 0.35))
     save_grounding = (not args.no_grounding) and icfg.get("save_grounding", True)
+    render_workers = args.render_workers if args.render_workers is not None else int(icfg.get("render_workers", 4))
     type_filter_str = args.type_filter or icfg.get("type_filter")
     if type_filter_str == "vsi-compat":
         type_filter = set(SPAR_VSI_COMPAT_TYPES)
@@ -263,6 +270,14 @@ def main() -> None:
     per_type_total: Dict[str, int] = {}
     per_type_correct: Dict[str, int] = {}
     autocast_enabled = dtype is not None and device.type == "cuda"
+
+    # Overlay rendering (matplotlib colormap + PIL blend/encode) is pure CPU
+    # work with no torch/GPU dependency -- submit it here instead of calling
+    # it inline, so the next batch's GPU forward doesn't wait on this batch's
+    # image rendering. render_workers=0 falls back to the old synchronous
+    # call (useful for debugging render errors without async noise).
+    render_pool = ThreadPoolExecutor(max_workers=render_workers) if render_workers > 0 else None
+    pending: List[Future] = []
 
     with open(predictions_path, "w", encoding="utf-8") as out_f, torch.no_grad():
         for batch in tqdm(loader, desc="vsibench-infer"):
@@ -342,7 +357,23 @@ def main() -> None:
                     # whether it's unique, e.g. across rows sharing the same scene).
                     dir_name = f"{batch['row_idx'][i]:06d}_{_sanitize_id(batch['id'][i])}"
                     sample_dir = grounding_dir / dir_name
-                    _save_grounding(batch["image_paths"][i], grounding_heat[i], sample_dir, heatmap_alpha)
+                    if render_pool is not None:
+                        pending.append(render_pool.submit(
+                            _save_grounding, batch["image_paths"][i], grounding_heat[i], sample_dir, heatmap_alpha
+                        ))
+                        # Reap finished futures periodically so a render bug surfaces
+                        # promptly (instead of only at shutdown) and the list doesn't
+                        # grow unbounded across a long run.
+                        if len(pending) > render_workers * 8:
+                            still_pending = []
+                            for fut in pending:
+                                if fut.done():
+                                    fut.result()  # re-raise if the render task failed
+                                else:
+                                    still_pending.append(fut)
+                            pending = still_pending
+                    else:
+                        _save_grounding(batch["image_paths"][i], grounding_heat[i], sample_dir, heatmap_alpha)
                     grounding_path = str(sample_dir.relative_to(output_dir))
 
                 out_f.write(json.dumps({
@@ -359,6 +390,11 @@ def main() -> None:
                     "checkpoint": str(checkpoint_path),
                     "step": step,
                 }, ensure_ascii=False) + "\n")
+
+    if render_pool is not None:
+        for fut in pending:
+            fut.result()  # re-raise if any queued render task failed
+        render_pool.shutdown(wait=True)  # block until every submitted render finishes
 
     per_type_accuracy = {
         qtype: per_type_correct[qtype] / per_type_total[qtype] for qtype in per_type_total
