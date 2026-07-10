@@ -23,4 +23,4 @@ srun singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
     python3 fusion_gv/infer_vsibench.py \
-        --config fusion_gv/configs/infer_vsibench.yaml
+        --config fusion_gv/configs/infer_vsibench_mixedsft_8select.yaml
