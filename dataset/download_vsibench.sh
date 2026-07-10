@@ -57,7 +57,8 @@ for fname in "${VIDEO_ZIPS[@]}"; do
     echo "  downloaded: $fname"
   fi
   echo "  extracting: $fname ..."
-  unzip -q -o "$SOURCE_DIR/$fname" -d "$SOURCE_DIR"
+  python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+    "$SOURCE_DIR/$fname" "$SOURCE_DIR"
   rm -f "$SOURCE_DIR/$fname"
   echo "  extracted and removed zip: $fname"
 done
