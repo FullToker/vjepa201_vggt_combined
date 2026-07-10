@@ -60,8 +60,8 @@ inference:
   # Both key styles kept: infer_gvjepa.py reads input_jsonl/output_jsonl/metrics_output,
   # infer_vsibench.py reads manifest/output_dir (used for the sft_grounding_mixed
   # checkpoint sanity check against SPAR's own eval set).
-  input_jsonl: ./data/spar_eva.jsonl
-  manifest: ./data/spar_eva.jsonl
+  input_jsonl: ./data/spar_sftqa_eva.jsonl
+  manifest: ./data/spar_sftqa_eva.jsonl
   input_root: .
   output_jsonl: ./outputs/inference/spar_sftmixed/spar_predictions.jsonl
   metrics_output: ./outputs/inference/spar_sftmixed/spar_metrics.json
