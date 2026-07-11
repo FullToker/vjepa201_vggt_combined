@@ -129,20 +129,24 @@ def main() -> None:
     print(f"Sampled {len(rows)} rows (seed={args.seed}) from {args.manifest}")
 
     # ---- 1. pred_embeddings across different samples (query+images) ----
-    vggt_list, jepa_list, queries = [], [], []
+    # MMSI-Bench rows have variable image count (2-10) -- unlike VSI-Bench's
+    # fixed 8, a random sample mixes different S per row, so they can't be
+    # torch.cat'd into one batched forward (preprocess() output shapes
+    # differ in the S dim). Run one row at a time instead: a single-row
+    # preprocess() output is already exactly what model._run_predictor
+    # expects for batch=1 (images_vggt (1,S,3,518,518), images_jepa
+    # (S,3,1,384,384)), so no reshaping needed, only the final pred_proj
+    # outputs (uniform shape regardless of S) get concatenated.
+    pred_embeddings_list = []
     for row in rows:
         imgs_v, imgs_j = preprocess(row["images"], need_vggt=need_vggt, need_jepa=True)
-        if imgs_v is not None:
-            vggt_list.append(imgs_v)
-        jepa_list.append(imgs_j)
-        queries.append(row.get("query", ""))
+        with torch.no_grad():
+            images_vggt = imgs_v.to(device) if imgs_v is not None else None
+            images_jepa = imgs_j.to(device)
+            _, pooled, _ = model._run_predictor(images_vggt, images_jepa, [row.get("query", "")])
+            pred_embeddings_list.append(model.pred_proj(pooled))
 
-    with torch.no_grad():
-        images_vggt = torch.cat(vggt_list, dim=0).to(device) if vggt_list else None
-        images_jepa = torch.cat([j.unsqueeze(0) for j in jepa_list], dim=0).flatten(0, 1).to(device)
-        _, pooled, _ = model._run_predictor(images_vggt, images_jepa, queries)
-        pred_embeddings = model.pred_proj(pooled)
-
+    pred_embeddings = torch.cat(pred_embeddings_list, dim=0)
     pred_norm = F.normalize(pred_embeddings.float(), dim=-1)
     sim_pred = pred_norm @ pred_norm.T
     mean, std, mn, mx = _off_diagonal_stats(sim_pred)
