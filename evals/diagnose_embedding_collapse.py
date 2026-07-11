@@ -177,27 +177,52 @@ def main() -> None:
     else:
         print("\nNo candidates found in manifest rows to test encode_target.")
 
-    # ---- 3. target rank among its own row's candidates ----
-    # Per row: cosine(pred_embedding_i, encode_target(candidate)) for each of
-    # that row's own candidates, ranked descending. Where does the true
-    # target land? This is the direct correctness-alignment test -- (1)/(2)
-    # only check whether embeddings vary, not whether that variation points
-    # the right way.
+    # ---- 2b/3. within-question candidate separability + target rank ----
+    # The global 35-candidate matrix above mixes two different effects: (a)
+    # whether the 4 options of the SAME question are separable (the thing
+    # that actually determines ranking correctness) and (b) baseline
+    # similarity between DIFFERENT questions' option text, which is expected
+    # to run higher than generic text since MC options here are all short,
+    # same-domain spatial-relation phrases -- that's normal clustering, not
+    # collapse. Restricting to each row's own candidates isolates (a).
+    within_row_sims: List[float] = []
     ranks: List[int] = []
     n_candidates_seen: List[int] = []
     for i, row in enumerate(rows):
         candidates = row.get("candidates")
         target = row.get("target")
-        if not candidates or target not in candidates:
+        if not candidates or len(candidates) < 2:
             continue
         with torch.no_grad():
             cand_emb = model.encode_target(candidates, device)
         cand_norm = F.normalize(cand_emb.float(), dim=-1)
-        sims = (cand_norm @ pred_norm[i]).tolist()
-        order = sorted(range(len(candidates)), key=lambda j: sims[j], reverse=True)
-        rank = order.index(candidates.index(target)) + 1  # 1-indexed
-        ranks.append(rank)
-        n_candidates_seen.append(len(candidates))
+
+        sim_within = cand_norm @ cand_norm.T
+        n = sim_within.shape[0]
+        mask = ~torch.eye(n, dtype=torch.bool, device=sim_within.device)
+        within_row_sims.append(sim_within[mask].mean().item())
+
+        if target in candidates:
+            sims = (cand_norm @ pred_norm[i]).tolist()
+            order = sorted(range(len(candidates)), key=lambda j: sims[j], reverse=True)
+            rank = order.index(candidates.index(target)) + 1  # 1-indexed
+            ranks.append(rank)
+            n_candidates_seen.append(len(candidates))
+
+    print("\n=== within-question candidate separability (per-row A/B/C/D vs each other, same question only) ===")
+    if within_row_sims:
+        m = statistics.mean(within_row_sims)
+        s = statistics.stdev(within_row_sims) if len(within_row_sims) > 1 else 0.0
+        hist_sorted = sorted(within_row_sims)
+        print(f"rows checked: {len(within_row_sims)}")
+        print(f"mean of per-row average off-diagonal sim: {m:.4f} (std across rows={s:.4f})")
+        print(f"lowest/highest row: {hist_sorted[0]:.4f} / {hist_sorted[-1]:.4f}")
+        print("  -> high value here (unlike the mixed 35-candidate test above) means the SAME")
+        print("     question's own options look near-identical -- this is the collapse that")
+        print("     would actually explain chance-level MC ranking, isolated from cross-question")
+        print("     domain clustering.")
+    else:
+        print("No rows with >=2 candidates to check.")
 
     print("\n=== target rank among its own row's candidates ===")
     if ranks:
