@@ -33,4 +33,4 @@ srun singularity exec \
     python3 evals/diagnose_embedding_collapse.py \
         --config "$CONFIG" \
         --manifest "$MANIFEST" \
-        --num-samples 16
+        --num-samples 24

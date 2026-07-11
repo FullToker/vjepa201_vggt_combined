@@ -9,27 +9,43 @@ script checks the next most likely cause: embedding collapse, i.e.
 pred_embeddings / encode_target output vectors that barely vary across
 different inputs, making cosine-candidate ranking effectively noise.
 
-Loads a handful of manifest rows, runs them through the model, and reports
-the off-diagonal cosine-similarity stats for:
-  1. pred_embeddings across different (images, query) samples
-  2. encode_target embeddings across distinct candidate option texts
+Randomly samples manifest rows (uniform over the whole file, not just the
+head -- manifests are sorted by num_images, so a head-only sample would be
+biased toward one image-count bucket), runs them through the model, and
+reports:
+  1. off-diagonal cosine-sim stats for pred_embeddings across different
+     (images, query) samples
+  2. off-diagonal cosine-sim stats for encode_target across distinct
+     candidate option texts
+  3. target-rank distribution: for each row, rank its own target string
+     among its candidates by cosine-sim to that row's pred_embedding. This
+     is the direct test of whether pred/target space alignment tracks
+     correctness -- (1)/(2) can both look "healthy" (spread out, not
+     collapsed) while still being misaligned, since collapse and alignment
+     are separate failure modes.
 
-Mean off-diagonal similarity close to 1.0 => collapsed (bad). Spread out
-(e.g. mean well below ~0.9, decent std) => embeddings do vary; the fault is
-likely elsewhere (training objective / loss never converged / data pairing).
+Mean off-diagonal similarity close to 1.0 in (1)/(2) => collapsed (bad).
+Mean target rank close to the random-chance expectation ((num_candidates+1)/2,
+e.g. 2.5 for 4-choice MC) in (3) => pred/target spaces aren't aligned by
+correctness even though embeddings vary -- points at a train/eval mismatch
+(e.g. training loss uses a different pred/target pairing or head than
+infer_gvjepa.py's eval-time scoring path) rather than at collapse.
 
 Usage:
-  python3 fusion_gv/diagnose_embedding_collapse.py \\
+  python3 evals/diagnose_embedding_collapse.py \\
       --config fusion_gv/configs/infer_mmsibench.yaml \\
       --manifest ./data/mmsibench_manifest.jsonl \\
-      --num-samples 16
+      --num-samples 24
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import random
+import statistics
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -46,15 +62,31 @@ from fusion_gv.infer_gvjepa import _load_checkpoint, _resolve_checkpoint
 from fusion_gv.preprocess import preprocess
 
 
-def _load_rows(manifest_path: Path, num_samples: int) -> List[Dict[str, Any]]:
+def _index_offsets(manifest_path: Path) -> List[int]:
+    offsets = []
+    with open(manifest_path, "rb") as f:
+        offset = f.tell()
+        for raw in f:
+            if raw.strip():
+                offsets.append(offset)
+            offset = f.tell()
+    return offsets
+
+
+def _sample_rows(manifest_path: Path, num_samples: int, seed: int) -> List[Dict[str, Any]]:
+    offsets = _index_offsets(manifest_path)
+    if not offsets:
+        raise ValueError(f"Empty manifest: {manifest_path}")
+
+    rng = random.Random(seed)
+    k = min(num_samples, len(offsets))
+    chosen = sorted(rng.sample(range(len(offsets)), k))
+
     rows = []
-    with open(manifest_path, encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            rows.append(json.loads(line))
-            if len(rows) >= num_samples:
-                break
+    with open(manifest_path, "rb") as f:
+        for idx in chosen:
+            f.seek(offsets[idx])
+            rows.append(json.loads(f.readline()))
     return rows
 
 
@@ -70,7 +102,8 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--num-samples", type=int, default=16)
+    parser.add_argument("--num-samples", type=int, default=24)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -90,10 +123,10 @@ def main() -> None:
 
     need_vggt = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv") == "fusion_gv"
 
-    rows = _load_rows(Path(args.manifest), args.num_samples)
+    rows = _sample_rows(Path(args.manifest), args.num_samples, args.seed)
     if len(rows) < 2:
         raise SystemExit("Need at least 2 manifest rows to compare embeddings.")
-    print(f"Loaded {len(rows)} rows from {args.manifest}")
+    print(f"Sampled {len(rows)} rows (seed={args.seed}) from {args.manifest}")
 
     # ---- 1. pred_embeddings across different samples (query+images) ----
     vggt_list, jepa_list, queries = [], [], []
@@ -139,6 +172,46 @@ def main() -> None:
         print("  -> mean close to 1.0 means the text encoder isn't distinguishing between different options.")
     else:
         print("\nNo candidates found in manifest rows to test encode_target.")
+
+    # ---- 3. target rank among its own row's candidates ----
+    # Per row: cosine(pred_embedding_i, encode_target(candidate)) for each of
+    # that row's own candidates, ranked descending. Where does the true
+    # target land? This is the direct correctness-alignment test -- (1)/(2)
+    # only check whether embeddings vary, not whether that variation points
+    # the right way.
+    ranks: List[int] = []
+    n_candidates_seen: List[int] = []
+    for i, row in enumerate(rows):
+        candidates = row.get("candidates")
+        target = row.get("target")
+        if not candidates or target not in candidates:
+            continue
+        with torch.no_grad():
+            cand_emb = model.encode_target(candidates, device)
+        cand_norm = F.normalize(cand_emb.float(), dim=-1)
+        sims = (cand_norm @ pred_norm[i]).tolist()
+        order = sorted(range(len(candidates)), key=lambda j: sims[j], reverse=True)
+        rank = order.index(candidates.index(target)) + 1  # 1-indexed
+        ranks.append(rank)
+        n_candidates_seen.append(len(candidates))
+
+    print("\n=== target rank among its own row's candidates ===")
+    if ranks:
+        mean_rank = statistics.mean(ranks)
+        median_rank = statistics.median(ranks)
+        top1_rate = sum(1 for r in ranks if r == 1) / len(ranks)
+        avg_n = statistics.mean(n_candidates_seen)
+        expected_random_rank = (avg_n + 1) / 2
+        hist = dict(sorted(Counter(ranks).items()))
+        print(f"rows scored: {len(ranks)}")
+        print(f"mean rank: {mean_rank:.3f}  (random-chance expected: ~{expected_random_rank:.2f} for avg {avg_n:.1f} candidates)")
+        print(f"median rank: {median_rank}")
+        print(f"top1 hit rate: {top1_rate:.3f}")
+        print(f"rank histogram (rank -> count): {hist}")
+        print("  -> mean rank near the random-chance value means pred/target spaces aren't")
+        print("     aligned by correctness, even if neither one individually looks collapsed.")
+    else:
+        print("No rows with valid candidates+target to compute rank.")
 
     print("\nDone.")
 
