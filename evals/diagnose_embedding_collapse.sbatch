@@ -2,8 +2,8 @@
 #SBATCH --job-name=diag_collapse
 #SBATCH --partition=geo
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 #SBATCH --time=00:30:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/diag_collapse_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/diag_collapse_%j.err
