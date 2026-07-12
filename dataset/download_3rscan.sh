@@ -49,13 +49,28 @@ i=0
 grep -oE '[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}' "$SCAN_LIST" | while read -r scan_id; do
   i=$((i + 1))
   out_file="$OUTPUT_DIR/$scan_id/$FILE_TYPE"
-  if [[ -f "$out_file" ]]; then
+  extracted_dir="$OUTPUT_DIR/$scan_id/sequence"
+
+  if [[ "$FILE_TYPE" == "sequence.zip" && -d "$extracted_dir" ]]; then
+    echo "  [$i/$TOTAL] skip (already extracted): $scan_id"
+    continue
+  fi
+  if [[ "$FILE_TYPE" != "sequence.zip" && -f "$out_file" ]]; then
     echo "  [$i/$TOTAL] skip (exists): $scan_id"
     continue
   fi
+
   echo "  [$i/$TOTAL] downloading: $scan_id"
   python3 "$SCRIPT_DIR/vendor_3rscan_download.py" \
     -o "$OUTPUT_DIR" --id "$scan_id" --type "$FILE_TYPE"
+
+  if [[ "$FILE_TYPE" == "sequence.zip" && -f "$out_file" ]]; then
+    echo "  [$i/$TOTAL] extracting: $scan_id"
+    mkdir -p "$extracted_dir"
+    python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+      "$out_file" "$extracted_dir"
+    rm -f "$out_file"
+  fi
 done
 
 echo "==> Done."
