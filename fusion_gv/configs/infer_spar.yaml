@@ -74,6 +74,10 @@ inference:
   mode: auto                    # auto, embedding, select, multichoices
   save_grounding: true
   heatmap_alpha: 0.35
+  # infer_vsibench.py only: VSI-Bench-comparable category subset, capped at
+  # ~1000 rows/category (reservoir-sampled) instead of running the full file.
+  type_filter: vsi-compat
+  max_per_type: 1000
   # SPAR rows have fixed 4-image inputs, so batching improves GPU utilization.
   # If fusion_gv OOMs, try 4; for vjepa-only, try 16 or 32.
   batch_size: 8
