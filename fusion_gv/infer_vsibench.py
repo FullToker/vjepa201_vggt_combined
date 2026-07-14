@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -94,10 +95,18 @@ def _save_grounding(image_paths: List[str], heatmap: np.ndarray, out_dir: Path, 
 
 
 class VSIBenchDataset(Dataset):
-    def __init__(self, manifest_path: str | Path, type_filter: set[str] | None = None) -> None:
-        """type_filter: SPAR-only knob. Keep a row only if row["type"] is in
-        the set (rows without a "type" field are kept as-is since VSI-Bench
-        manifests don't have one). Leave None for VSI-Bench runs -- no-op.
+    def __init__(
+        self,
+        manifest_path: str | Path,
+        type_filter: set[str] | None = None,
+        max_per_type: int | None = None,
+    ) -> None:
+        """type_filter / max_per_type: SPAR-only knobs, both no-op for VSI-Bench
+        manifests (no "type" field -> every row is kept regardless).
+
+        type_filter: keep a row only if row["type"] is in the set.
+        max_per_type: cap rows per row["type"] value via reservoir sampling
+            (unbiased random N, single streaming pass, no full-file load).
         """
         self.manifest_path = Path(manifest_path)
 
@@ -105,18 +114,33 @@ class VSIBenchDataset(Dataset):
         # Keeps per-process memory to O(N) ints instead of O(N) dicts, so
         # DataLoader workers (fork'd copies) don't each balloon to a full
         # copy of a multi-million-row parsed manifest (see GVJEPADataset).
+        needs_type = type_filter is not None or max_per_type is not None
+        reservoirs: dict[str, list[int]] = {}
+        seen_counts: dict[str, int] = {}
         self._offsets: list[int] = []
         with open(self.manifest_path, "rb") as f:
             offset = f.tell()
             for raw in f:
                 if raw.strip():
-                    keep = True
-                    if type_filter is not None:
-                        row_type = json.loads(raw).get("type")
-                        keep = row_type is None or row_type in type_filter
+                    row_type = json.loads(raw).get("type") if needs_type else None
+                    keep = type_filter is None or row_type is None or row_type in type_filter
                     if keep:
-                        self._offsets.append(offset)
+                        if max_per_type is None or row_type is None:
+                            self._offsets.append(offset)
+                        else:
+                            seen_counts[row_type] = seen_counts.get(row_type, 0) + 1
+                            bucket = reservoirs.setdefault(row_type, [])
+                            if len(bucket) < max_per_type:
+                                bucket.append(offset)
+                            else:
+                                j = random.randint(0, seen_counts[row_type] - 1)
+                                if j < max_per_type:
+                                    bucket[j] = offset
                 offset = f.tell()
+        if reservoirs:
+            for bucket in reservoirs.values():
+                self._offsets.extend(bucket)
+            self._offsets.sort()  # restore file order for locality-friendly seeks
         if not self._offsets:
             raise ValueError(f"Empty manifest: {self.manifest_path}")
 
@@ -204,6 +228,10 @@ def main() -> None:
         help="SPAR-only: comma-separated row['type'] values to keep, or 'vsi-compat' for the "
              "built-in VSI-Bench-comparable preset. Unset -> no filtering (VSI-Bench default).",
     )
+    parser.add_argument(
+        "--max-per-type", type=int, default=None,
+        help="SPAR-only: cap rows per row['type'] via reservoir sampling (unbiased random N). Unset -> no cap.",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -223,6 +251,7 @@ def main() -> None:
         type_filter = set(SPAR_VSI_COMPAT_TYPES)
     else:
         type_filter = set(type_filter_str.split(",")) if type_filter_str else None
+    max_per_type = args.max_per_type if args.max_per_type is not None else icfg.get("max_per_type")
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
 
@@ -245,7 +274,8 @@ def main() -> None:
 
     need_vggt = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv") == "fusion_gv"
 
-    dataset = VSIBenchDataset(manifest_path, type_filter=type_filter)
+    dataset = VSIBenchDataset(manifest_path, type_filter=type_filter, max_per_type=max_per_type)
+    print(f"dataset rows after filter/sampling: {len(dataset)}")
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
