@@ -3,7 +3,7 @@
 #SBATCH --partition=geo
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/jupyter_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/jupyter_%j.err
 
