@@ -20,7 +20,7 @@ mkdir -p "$ROOT/logs"
 
 # Which scene to fetch -- override at submit time:
 #   sbatch --export=SCENE_ID=scene0002_00 dataset/download_scannet_scene_mesh.sbatch
-SCENE_ID="${SCENE_ID:-scene0002_00}"
+SCENE_ID="${SCENE_ID:-scene0011_00}"
 OUT_DIR="${OUT_DIR:-$ROOT/source_data/scannet_mesh}"
 
 echo "Start ScanNet mesh download for ${SCENE_ID} at $(date)"
