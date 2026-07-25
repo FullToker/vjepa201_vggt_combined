@@ -28,13 +28,11 @@ fusion:
   jepa_patch_size:  16
   jepa_embed_dim:   1024
   jepa_num_patches: 576
-  fusion_type: concat
-  num_levels:  4
+  proj_dim: 1024
 
 
 # ── Predictor + projection heads ──────────────────────────────────────────────
 model:
-  use_fusion_level: 3
   predictor_hidden_size: 1024
   predictor_layers:      8
   predictor_heads:       16

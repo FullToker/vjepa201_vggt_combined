@@ -1,21 +1,15 @@
 """
-Spatial-alignment fusion: concat without projection.
+Single-level spatial-alignment fusion: per-stream LN+MLP projector, then align+concat.
 
-JEPA tokens (24×24 = 576) are bilinearly interpolated up to VGGT's
-37×37 = 1369 grid, then both feature vectors are concatenated along
-the channel dimension. No learnable parameters — zero information loss.
+Only the final encoder level is used (no multi-level fusion, no cross-attention).
 
-Architecture (per level):
-    jepa_up = bilinear(jepa_feat, 24×24 → 37×37)    (B*S, 1369, 1024)
-    fused   = cat([vggt_feat, jepa_up], dim=-1)      (B*S, 1369, 3072)
+Architecture:
+    geo = GELU-MLP(LN(vggt_feat))            (B,S,1369, proj_dim)
+    sem = GELU-MLP(LN(jepa_feat))            (B,S, 576, proj_dim)
+    sem = bilinear(sem, 24×24 → 37×37)       (B,S,1369, proj_dim)
+    fused = cat([geo, sem], dim=-1)          (B,S,1369, 2*proj_dim)
 
-Output dim = vggt_dim + jepa_dim = 2048 + 1024 = 3072 (fixed).
-
-Level alignment:
-    level 0  →  VGGT round  4  /  JEPA block  5   (early)
-    level 1  →  VGGT round 11  /  JEPA block 11   (mid-early)
-    level 2  →  VGGT round 17  /  JEPA block 17   (mid-late)
-    level 3  →  VGGT round 23  /  JEPA block 23   (final)
+Output dim = 2 * proj_dim (default 2 * 1024 = 2048).
 """
 
 import torch
@@ -52,56 +46,61 @@ class SpatialAlign(nn.Module):
         return x   # (B*S, tgt_grid², D)
 
 
-class AlignedMultiLevelFusion(nn.Module):
+class SingleLevelFusion(nn.Module):
     """
-    4-level spatial-alignment fusion via direct concatenation.
-    No learnable parameters in this module.
-
-    Input / output contract (same interface as MultiLevelFusion):
-        vggt_feats : list of N × (B, S, 1369, 2048)
-        jepa_feats : list of N × (B, S,  576, 1024)
-        returns    : list of N × (B, S, 1369, 3072)
+    Final-level-only fusion: per-stream LayerNorm + 2-layer MLP projector,
+    JEPA spatially aligned to VGGT's grid, then channel-concat.
 
     Args:
-        num_levels : number of fusion levels    (default 4)
-        vggt_dim   : VGGT feature dim           (default 2048)
-        jepa_dim   : JEPA feature dim           (default 1024)
-        src_grid   : JEPA spatial grid size     (default 24)
-        tgt_grid   : VGGT spatial grid size     (default 37)
-        **kwargs   : absorbs unused params (d_fusion, num_heads, …) from config
+        vggt_dim : VGGT feature dim           (default 2048)
+        jepa_dim : JEPA feature dim           (default 1024)
+        proj_dim : per-stream projected dim   (default 1024) → fused dim = 2*proj_dim
+        src_grid : JEPA spatial grid size     (default 24)
+        tgt_grid : VGGT spatial grid size     (default 37)
     """
 
     def __init__(
         self,
-        num_levels: int = 4,
         vggt_dim: int = 2048,
         jepa_dim: int = 1024,
+        proj_dim: int = 1024,
         src_grid: int = 24,
         tgt_grid: int = 37,
-        **kwargs,                    # silently absorb d_fusion, ffn_ratio, etc.
+        **kwargs,   # silently absorb unrelated config fields
     ):
         super().__init__()
-        self.num_levels = num_levels
-        self.out_dim    = vggt_dim + jepa_dim   # 3072
-        self.align      = SpatialAlign(src_grid=src_grid, tgt_grid=tgt_grid)
+        self.out_dim = proj_dim * 2
+
+        self.geo_proj = nn.Sequential(
+            nn.LayerNorm(vggt_dim),
+            nn.Linear(vggt_dim, proj_dim),
+            nn.GELU(),
+            nn.Linear(proj_dim, proj_dim),
+        )
+        self.sem_proj = nn.Sequential(
+            nn.LayerNorm(jepa_dim),
+            nn.Linear(jepa_dim, proj_dim),
+            nn.GELU(),
+            nn.Linear(proj_dim, proj_dim),
+        )
+        self.align = SpatialAlign(src_grid=src_grid, tgt_grid=tgt_grid)
 
     def forward(
         self,
-        vggt_feats: list[torch.Tensor],
-        jepa_feats: list[torch.Tensor],
-    ) -> list[torch.Tensor]:
+        vggt_feat: torch.Tensor,
+        jepa_feat: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        vggt_feats : list of 4 × (B, S, 1369, 2048)
-        jepa_feats : list of 4 × (B, S,  576, 1024)
-        returns    : list of 4 × (B, S, 1369, 3072)
+        vggt_feat : (B, S, 1369, vggt_dim)   final level only
+        jepa_feat : (B, S,  576, jepa_dim)   final level only
+        returns   : (B, S, 1369, 2*proj_dim)
         """
-        B, S = vggt_feats[0].shape[:2]
-        fused_list = []
+        B, S = vggt_feat.shape[:2]
 
-        for i in range(self.num_levels):
-            vg     = vggt_feats[i].flatten(0, 1)          # (B*S, 1369, 2048)
-            je_up  = self.align(jepa_feats[i].flatten(0, 1))  # (B*S, 1369, 1024)
-            fused  = torch.cat([vg, je_up], dim=-1)        # (B*S, 1369, 3072)
-            fused_list.append(fused.view(B, S, fused.shape[-2], fused.shape[-1]))
+        geo = self.geo_proj(vggt_feat)                 # (B,S,1369,proj_dim)
 
-        return fused_list   # 4 × (B, S, 1369, 3072)
+        sem = self.sem_proj(jepa_feat)                  # (B,S, 576,proj_dim)
+        sem = self.align(sem.flatten(0, 1))             # (B*S,1369,proj_dim)
+        sem = sem.view(B, S, *sem.shape[1:])            # (B,S,1369,proj_dim)
+
+        return torch.cat([geo, sem], dim=-1)             # (B,S,1369,2*proj_dim)

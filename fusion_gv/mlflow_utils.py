@@ -129,7 +129,7 @@ def start_mlflow_run(cfg: Dict[str, Any]) -> AbstractContextManager:
 
     tags = dict(mcfg.get("tags", {}))
     tags.setdefault("x_encoder_type", cfg.get("fusion", {}).get("x_encoder_type", "unknown"))
-    tags.setdefault("fusion_type", cfg.get("fusion", {}).get("fusion_type", "unknown"))
+    tags.setdefault("proj_dim", str(cfg.get("fusion", {}).get("proj_dim", "unknown")))
 
     mlflow.start_run(run_name=run_name, tags=tags)
     logger = MLflowLogger(mlflow)

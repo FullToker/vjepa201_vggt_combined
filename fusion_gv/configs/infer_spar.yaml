@@ -3,7 +3,7 @@
 
 fusion:
   x_encoder_type: fusion_gv       # "fusion_gv" or "vjepa"
-  x_encoder_output_dim: null      # defaults: fusion_gv=3072, vjepa=1024
+  x_encoder_output_dim: null      # defaults: fusion_gv=2048, vjepa=1024
 
   vggt_ckpt: ./ckpts/vggt.pt
   jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
@@ -18,12 +18,9 @@ fusion:
   jepa_embed_dim:      1024
   jepa_num_patches:    576
 
-  fusion_type: concat
-  num_levels:  4
+  proj_dim: 1024
 
 model:
-  use_fusion_level: 3
-
   predictor_hidden_size: 1024
   predictor_layers:      8
   predictor_heads:       16

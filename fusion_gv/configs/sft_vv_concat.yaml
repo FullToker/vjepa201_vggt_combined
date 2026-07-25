@@ -4,11 +4,11 @@
 #
 # Architecture recap:
 #   FrozenVGGT  (2048-d, 37×37 patches)  ─┐
-#                                          ├─► AlignedMultiLevelFusion (concat)
-#   FrozenJEPA  (1024-d, 24×24 patches)  ─┘      → 4 × (B, S, 1369, 3072)
-#                                                           │  level 3 + mean-pool
+#                                          ├─► SingleLevelFusion (LN+MLP+align+concat)
+#   FrozenJEPA  (1024-d, 24×24 patches)  ─┘      → (B, S, 1369, 2048)
+#                                                           │  mean-pool
 #                                                           ▼
-#                                                     (B, S, 3072)
+#                                                     (B, S, 2048)
 #                                                           │  vis_proj
 #                                                           ▼
 #                                                    Predictor (bidir Transformer)
@@ -33,7 +33,7 @@
 fusion:
   # X-encoder mode: "fusion_gv" = current VGGT + V-JEPA concat, "vjepa" = V-JEPA only
   x_encoder_type: fusion_gv
-  # Optional explicit visual feature dim. Defaults: fusion_gv=3072, vjepa=1024.
+  # Optional explicit visual feature dim. Defaults: fusion_gv=2048, vjepa=1024.
   x_encoder_output_dim: null
 
   # Checkpoint paths (relative to project root or absolute)
@@ -51,18 +51,14 @@ fusion:
   jepa_embed_dim:      1024
   jepa_num_patches:    576
 
-  # Fusion strategy — "concat" is the only parameter-free option
-  fusion_type: concat            # bilinear spatial-align + channel concat → 3072-d
-  num_levels:  4                 # 4 aligned levels tapped from both encoders
+  # Fusion: per-stream LN+MLP(GELU) projector → bilinear spatial-align → channel concat
+  proj_dim: 1024                 # each stream projected to this dim → fused = 2*proj_dim = 2048
 
 
 # ── Predictor + projection heads ──────────────────────────────────────────────
 model:
-  # Which of the 4 fusion levels feeds the predictor (0=early … 3=final)
-  use_fusion_level: 3
-
   # Bidirectional transformer predictor
-  predictor_hidden_size: 1024    # vis_proj maps 3072 → this dim
+  predictor_hidden_size: 1024    # vis_proj maps 2048 → this dim
   predictor_layers:      8
   predictor_heads:       16
   predictor_ffn_mult:    4

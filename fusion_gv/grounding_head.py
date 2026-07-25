@@ -106,7 +106,7 @@ class GroundingHead(nn.Module):
         gt_mask: (B*S, G, G) binary float, derived from projected 2D bbox.
 
     Args:
-        spatial_dim:  D_f from FusionGV (3072 for concat fusion)
+        spatial_dim:  D_f from FusionGV (2048 by default, = 2 * proj_dim)
         hidden_dim:   h — must equal predictor_hidden_size
         num_layers:   cross-attn depth
         num_heads:    attention heads (must divide hidden_dim)

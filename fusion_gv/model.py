@@ -1,13 +1,13 @@
 """
-FusionGV: semantic (V-JEPA 2.1) + geometric (VGGT) multi-level feature fusion.
+FusionGV: semantic (V-JEPA 2.1) + geometric (VGGT) final-level feature fusion.
 
-Both encoders are frozen. Only MultiLevelFusion parameters are trained.
+Both encoders are frozen. Only SingleLevelFusion parameters are trained.
 
 Usage
 -----
     from fusion_gv import FusionGV, FusionConfig, preprocess
 
-    cfg   = FusionConfig()          # fusion_type="concat" by default
+    cfg   = FusionConfig()
     model = FusionGV(cfg).cuda()
 
     # preprocess accepts file paths or PIL Images
@@ -18,7 +18,7 @@ Usage
     images_jepa = images_jepa.cuda()
 
     fused = model(images_vggt, images_jepa)
-    # fused: list of 4 × (1, S, 1369, 3072)   [concat fusion, no projection]
+    # fused: (1, S, 1369, 2048)   [final-level LN+MLP projector + spatial align + concat]
 """
 
 import torch
@@ -26,37 +26,18 @@ import torch.nn as nn
 
 from fusion_gv.config import FusionConfig
 from fusion_gv.encoders import FrozenVGGT, FrozenJEPA
-from fusion_gv.fusion import MultiLevelFusion
-from fusion_gv.fusion_aligned import AlignedMultiLevelFusion
+from fusion_gv.fusion_aligned import SingleLevelFusion
 
-_FUSION_TYPES = ("concat", "cross_attn")
 _X_ENCODER_TYPES = ("fusion_gv", "vjepa")
 
 
 def _build_fusion(config: FusionConfig) -> nn.Module:
-    if config.fusion_type == "concat":
-        return AlignedMultiLevelFusion(
-            num_levels=config.num_levels,
-            vggt_dim=config.vggt_out_dim,
-            jepa_dim=config.jepa_embed_dim,
-            d_fusion=config.d_fusion,
-            ffn_ratio=config.ffn_ratio,
-            dropout=config.dropout,
-            src_grid=int(config.jepa_num_patches ** 0.5),   # 24
-            tgt_grid=int(config.vggt_num_patches ** 0.5),   # 37
-        )
-    if config.fusion_type == "cross_attn":
-        return MultiLevelFusion(
-            num_levels=config.num_levels,
-            vggt_dim=config.vggt_out_dim,
-            jepa_dim=config.jepa_embed_dim,
-            d_fusion=config.d_fusion,
-            num_heads=config.num_heads,
-            ffn_ratio=config.ffn_ratio,
-            dropout=config.dropout,
-        )
-    raise ValueError(
-        f"Unknown fusion_type '{config.fusion_type}'. Choose from {_FUSION_TYPES}."
+    return SingleLevelFusion(
+        vggt_dim=config.vggt_out_dim,
+        jepa_dim=config.jepa_embed_dim,
+        proj_dim=config.proj_dim,
+        src_grid=int(config.jepa_num_patches ** 0.5),   # 24
+        tgt_grid=int(config.vggt_num_patches ** 0.5),   # 37
     )
 
 
@@ -74,14 +55,14 @@ class VJEPAOnlyXEncoder(nn.Module):
         self,
         images_vggt: torch.Tensor | None,
         images_jepa: torch.Tensor,
-    ) -> list[torch.Tensor]:
-        """Return 4 levels of V-JEPA features: (B, S, 576, 1024)."""
+    ) -> torch.Tensor:
+        """Return final-level V-JEPA features: (B, S, 576, 1024)."""
         if images_vggt is not None:
             B, S = images_vggt.shape[:2]
         else:
             B = 1
             S = images_jepa.shape[0]
-        return self.jepa_encoder(images_jepa, B, S)
+        return self.jepa_encoder(images_jepa, B, S)[-1]
 
     def trainable_parameters(self):
         return iter(())
@@ -105,15 +86,13 @@ class FusionGV(nn.Module):
     """
     Top-level model.
 
-    Frozen encoders:
-        FrozenVGGT  — geometric features, 4 levels × (B, S, 1369, 2048)
-        FrozenJEPA  — semantic features,  4 levels × (B, S,  576, 1024)
+    Frozen encoders (only the final level of each is used):
+        FrozenVGGT  — geometric features, final level (B, S, 1369, 2048)
+        FrozenJEPA  — semantic features,  final level (B, S,  576, 1024)
 
-    Fusion module (selected by config.fusion_type):
-        "concat"     → AlignedMultiLevelFusion  (bilinear spatial align + concat, default)
-                       no trainable parameters; output dim = vggt_out_dim + jepa_embed_dim = 3072
-        "cross_attn" → MultiLevelFusion         (cross-attention, learnable)
-                       output dim = config.d_fusion
+    Fusion module: SingleLevelFusion (per-stream LN+MLP projector,
+    bilinear spatial align, channel concat). Output dim = 2 * config.proj_dim
+    (default 2048).
 
     Args:
         config : FusionConfig instance (uses defaults if None)
@@ -135,28 +114,22 @@ class FusionGV(nn.Module):
         self,
         images_vggt: torch.Tensor,
         images_jepa: torch.Tensor,
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Args:
             images_vggt : (B, S, 3, 518, 518)  float32 [0, 1]
             images_jepa : (B*S, 3, 1, 384, 384) float32, ImageNet-normalised
 
         Returns:
-            list of 4 × (B, S, 1369, D_fused)
-            D_fused = 3072 for "concat", d_fusion for "cross_attn"
-            index 0 = early features, index 3 = final features
+            (B, S, 1369, D_fused)   D_fused = 2 * config.proj_dim (default 2048)
         """
         B, S = images_vggt.shape[:2]
 
         vggt_feats = self.vggt_encoder(images_vggt)          # 4 × (B, S, 1369, 2048)
         jepa_feats = self.jepa_encoder(images_jepa, B, S)    # 4 × (B, S,  576, 1024)
 
-        return self.fusion(vggt_feats, jepa_feats)            # 4 × (B, S, 1369, D_f)
+        return self.fusion(vggt_feats[-1], jepa_feats[-1])    # (B, S, 1369, D_f), final level only
 
     def trainable_parameters(self):
-        """Returns trainable parameters (fusion module only; encoders are frozen).
-
-        Note: AlignedMultiLevelFusion (concat) has no learnable parameters,
-        so this returns an empty iterator when fusion_type='concat'.
-        """
+        """Returns trainable parameters (fusion module only; encoders are frozen)."""
         return self.fusion.parameters()

@@ -531,8 +531,7 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
         x_encoder_output_dim=f.get("x_encoder_output_dim"),
         vggt_ckpt=f.get("vggt_ckpt", "./ckpts/vggt.pt"),
         jepa_ckpt=f["jepa_ckpt"],
-        fusion_type=f.get("fusion_type", "concat"),
-        num_levels=f.get("num_levels", 4),
+        proj_dim=f.get("proj_dim", 1024),
         # encoder geometry (use dataclass defaults if not specified)
         **{k: f[k] for k in (
             "vggt_img_size", "vggt_patch_size", "vggt_embed_dim",
@@ -545,7 +544,6 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     g = cfg.get("grounding", {})
     model_cfg = GVJEPAConfig(
         fusion=fusion_cfg,
-        use_fusion_level=m.get("use_fusion_level", 3),
         predictor_hidden_size=m["predictor_hidden_size"],
         predictor_layers=m["predictor_layers"],
         predictor_heads=m["predictor_heads"],

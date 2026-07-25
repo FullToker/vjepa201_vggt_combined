@@ -48,15 +48,13 @@ cfg = check("import FusionConfig", lambda: (
 
 def _test_encoder_dim_config():
     FusionConfig = __import__("fusion_gv.config", fromlist=["FusionConfig"]).FusionConfig
-    assert FusionConfig(x_encoder_type="fusion_gv").visual_dim == 3072
+    assert FusionConfig(x_encoder_type="fusion_gv").visual_dim == 2048
     assert FusionConfig(x_encoder_type="vjepa").visual_dim == 1024
     assert FusionConfig(x_encoder_type="vjepa", x_encoder_output_dim=768).visual_dim == 768
 
 check("FusionConfig x_encoder_type / x_encoder_output_dim", _test_encoder_dim_config)
-check("import MultiLevelFusion",
-      lambda: __import__("fusion_gv.fusion", fromlist=["MultiLevelFusion"]))
-check("import AlignedMultiLevelFusion",
-      lambda: __import__("fusion_gv.fusion_aligned", fromlist=["AlignedMultiLevelFusion"]))
+check("import SingleLevelFusion",
+      lambda: __import__("fusion_gv.fusion_aligned", fromlist=["SingleLevelFusion"]))
 check("import preprocess",
       lambda: __import__("fusion_gv.preprocess", fromlist=["preprocess"]))
 check("import build_x_encoder",
@@ -85,40 +83,26 @@ if result:
 # ── Phase 3: fusion module shapes ─────────────────────────────────────────────
 print("\n=== Phase 3: fusion module shapes (random tensors, no weights) ===")
 
-from fusion_gv.fusion import MultiLevelFusion
-from fusion_gv.fusion_aligned import AlignedMultiLevelFusion
+from fusion_gv.fusion_aligned import SingleLevelFusion
 
 B, S = 1, 8
-D_concat = 3072   # vggt_out_dim(2048) + jepa_embed_dim(1024)
-D_cross  = 512    # d_fusion used by cross_attn
+D_fused = 2048   # 2 * proj_dim (default proj_dim=1024)
 
 def _make_feats():
-    vggt = [torch.randn(B, S, 1369, 2048) for _ in range(4)]
-    jepa = [torch.randn(B, S,  576, 1024) for _ in range(4)]
+    vggt = torch.randn(B, S, 1369, 2048)   # final level only
+    jepa = torch.randn(B, S,  576, 1024)   # final level only
     return vggt, jepa
 
-def _test_aligned_concat():
-    m = AlignedMultiLevelFusion()
+def _test_single_level_fusion():
+    m = SingleLevelFusion()
     vggt, jepa = _make_feats()
     out = m(vggt, jepa)
-    assert len(out) == 4
-    for i, t in enumerate(out):
-        assert t.shape == (B, S, 1369, D_concat), f"level {i}: {t.shape}"
-    return [t.shape for t in out]
+    assert out.shape == (B, S, 1369, D_fused), f"{out.shape}"
+    return out.shape
 
-def _test_cross_attn():
-    m = MultiLevelFusion(d_fusion=D_cross, num_heads=8)
-    vggt, jepa = _make_feats()
-    out = m(vggt, jepa)
-    assert len(out) == 4
-    for i, t in enumerate(out):
-        assert t.shape == (B, S, 1369, D_cross), f"level {i}: {t.shape}"
-    return [t.shape for t in out]
-
-r1 = check("AlignedMultiLevelFusion  (concat)     4 levels → (B,S,1369,3072)", _test_aligned_concat)
-r2 = check("MultiLevelFusion         (cross_attn) 4 levels → (B,S,1369,512)",  _test_cross_attn)
+r1 = check("SingleLevelFusion  (LN+MLP+align+concat)  → (B,S,1369,2048)", _test_single_level_fusion)
 if r1:
-    print(f"         output per level : {r1[0]}")
+    print(f"         output shape : {r1}")
 
 
 # ── Phase 4: full FusionGV (requires ckpts/) ──────────────────────────────────
@@ -137,34 +121,19 @@ if not os.path.exists(vggt_ckpt) or not os.path.exists(jepa_ckpt):
 else:
     from fusion_gv.model import FusionGV
 
-    def _test_full_concat():
-        cfg = FusionConfig(fusion_type="concat")
+    def _test_full_fusion():
+        cfg = FusionConfig()
         model = FusionGV(cfg).eval()
         imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
         vggt_t, jepa_t = preprocess(imgs)
         with torch.no_grad():
             out = model(vggt_t, jepa_t)
-        assert len(out) == 4
-        for t in out:
-            assert t.shape == (1, S, 1369, D_concat)   # vggt_dim + jepa_dim, no projection
-        return out[0].shape
+        assert out.shape == (1, S, 1369, D_fused), out.shape
+        return out.shape
 
-    def _test_full_cross():
-        cfg = FusionConfig(d_fusion=D_cross, fusion_type="cross_attn")
-        model = FusionGV(cfg).eval()
-        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
-        vggt_t, jepa_t = preprocess(imgs)
-        with torch.no_grad():
-            out = model(vggt_t, jepa_t)
-        assert len(out) == 4
-        for t in out:
-            assert t.shape == (1, S, 1369, D_cross)
-        return out[0].shape
-
-    r3 = check("FusionGV fusion_type='concat'     end-to-end", _test_full_concat)
-    r4 = check("FusionGV fusion_type='cross_attn' end-to-end", _test_full_cross)
+    r3 = check("FusionGV end-to-end", _test_full_fusion)
     if r3:
-        print(f"         output per level : {r3}")
+        print(f"         output shape : {r3}")
 
 
 # ── Phase 5: V-JEPA-only X-encoder forward ───────────────────────────────────
@@ -184,10 +153,8 @@ else:
         vggt_t, jepa_t = preprocess(imgs)
         with torch.no_grad():
             out = model(vggt_t, jepa_t)
-        assert len(out) == 4
-        for t in out:
-            assert t.shape == (1, S, 576, 1024), t.shape
-        return out[0].shape
+        assert out.shape == (1, S, 576, 1024), out.shape
+        return out.shape
 
     def _test_gvjepa_with_vjepa_xencoder():
         fusion_cfg = FusionConfig(x_encoder_type="vjepa")
@@ -209,10 +176,10 @@ else:
         assert out["target"].shape == (1, 64), out["target"].shape
         return out["pred"].shape
 
-    r5 = check("VJEPAOnlyXEncoder forward → 4 levels of (B,S,576,1024)", _test_vjepa_only_xencoder)
+    r5 = check("VJEPAOnlyXEncoder forward → (B,S,576,1024)", _test_vjepa_only_xencoder)
     r6 = check("FusionGVJEPA x_encoder_type='vjepa' forward", _test_gvjepa_with_vjepa_xencoder)
     if r5:
-        print(f"         output per level : {r5}")
+        print(f"         output shape     : {r5}")
     if r6:
         print(f"         pred embedding   : {r6}")
 

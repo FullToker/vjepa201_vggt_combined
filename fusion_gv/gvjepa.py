@@ -3,10 +3,10 @@ FusionGVJEPA: VL-JEPA training head on top of FusionGV.
 
 Architecture (paper: arXiv 2512.10942v2)
 -----------------------------------------
-    FusionGV (X-encoder, frozen encoders + concat fusion)
-        → list of 4 × (B, S, 1369, D_fused)   D_fused = 3072 for "concat"
+    FusionGV (X-encoder, frozen encoders + final-level fusion)
+        → (B, S, 1369, D_fused)   D_fused = 2 * proj_dim (default 2048)
 
-    level select + spatial mean-pool
+    spatial mean-pool
         → (B, S, D_fused)
 
     vis_proj  → (B, S, D_pred)
@@ -37,7 +37,7 @@ Usage
     from fusion_gv.gvjepa import FusionGVJEPA, GVJEPAConfig
     from fusion_gv.config import FusionConfig
 
-    cfg = GVJEPAConfig(fusion=FusionConfig(d_fusion=512))
+    cfg = GVJEPAConfig(fusion=FusionConfig(proj_dim=1024))
     model = FusionGVJEPA(cfg).cuda()
 
     out = model(images_vggt, images_jepa, queries=["..."], targets=["..."])
@@ -160,9 +160,6 @@ class GVJEPAConfig:
     # Y-Encoder LR multiplier (paper Sec. 3.2, Tab. 7b)
     y_encoder_lr_multiplier: float = 0.05
 
-    # Which of the 4 fusion levels to use as visual tokens (0=early, 3=final)
-    use_fusion_level: int = 3
-
     # Local directory where HuggingFace model weights are cached
     # All AutoModel / AutoTokenizer downloads land here (mirrors ./ckpts layout)
     hf_cache_dir: str = "./ckpts"
@@ -194,13 +191,13 @@ class FusionGVJEPA(nn.Module):
 
         h = config.predictor_hidden_size
         # Visual dim is configurable so future fusion projections do not require
-        # changing this head. Defaults: fusion_gv=3072, vjepa=1024.
+        # changing this head. Defaults: fusion_gv=2048, vjepa=1024.
         D_fused = config.fusion.visual_dim
 
         # ── X-encoder (visual) ───────────────────────────────────────────────
         self.x_encoder = build_x_encoder(config.fusion)
 
-        # Project concat-fused spatial features to predictor dim
+        # Project fused spatial features to predictor dim
         self.vis_proj = nn.Linear(D_fused, h)
 
         # ── Query encoder (frozen) ───────────────────────────────────────────
@@ -289,14 +286,13 @@ class FusionGVJEPA(nn.Module):
         images_vggt: torch.Tensor,
         images_jepa: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run FusionGV and spatially mean-pool the chosen level.
+        """Run the X-encoder and spatially mean-pool its final-level output.
 
         Returns:
             pooled:  (B, S, D_f)       mean-pooled over patches
             spatial: (B, S, P, D_f)    raw patch features before pooling
         """
-        feats = self.x_encoder(images_vggt, images_jepa)  # 4 × (B, S, P, D_f)
-        feat = feats[self.config.use_fusion_level]         # (B, S, P, D_f)
+        feat = self.x_encoder(images_vggt, images_jepa)   # (B, S, P, D_f)
         return feat.mean(dim=2), feat                      # (B,S,D_f), (B,S,P,D_f)
 
     def _tokenize(self, tokenizer, texts: list[str], max_length: int, device: torch.device):

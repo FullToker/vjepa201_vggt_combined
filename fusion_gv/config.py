@@ -30,24 +30,17 @@ class FusionConfig:
     jepa_out_layers: tuple = (5, 11, 17, 23)   # must be subset of hierarchical_layers
 
     # ── Fusion module ──────────────────────────────────────────────────────────
-    # "concat"     → AlignedMultiLevelFusion  (bilinear spatial align + concat)
-    #                output dim = vggt_out_dim + jepa_embed_dim = 3072, no learned params
-    # "cross_attn" → MultiLevelFusion         (cross-attention, learnable, heavier)
-    #                output dim = d_fusion
-    fusion_type: str = "concat"
-    num_levels: int = 4
-    # cross_attn-only fields (ignored by concat fusion):
-    d_fusion: int = 512
-    num_heads: int = 8
-    ffn_ratio: float = 4.0
-    dropout: float = 0.0
+    # SingleLevelFusion: per-stream LayerNorm + 2-layer MLP(GELU) projector,
+    # bilinear spatial align (JEPA 24×24 → VGGT 37×37), channel concat.
+    # Uses only the final level of each encoder. Output dim = 2 * proj_dim.
+    proj_dim: int = 1024
 
     @property
     def fused_dim(self) -> int:
-        """Output channel dim of the aligned-concat fusion (fixed, no projection)."""
+        """Output channel dim of the fusion module."""
         if self.x_encoder_output_dim is not None:
             return self.x_encoder_output_dim
-        return self.vggt_out_dim + self.jepa_embed_dim   # 2048 + 1024 = 3072
+        return self.proj_dim * 2   # 2048 by default
 
     @property
     def visual_dim(self) -> int:
@@ -55,7 +48,7 @@ class FusionConfig:
         if self.x_encoder_output_dim is not None:
             return self.x_encoder_output_dim
         if self.x_encoder_type == "fusion_gv":
-            return self.vggt_out_dim + self.jepa_embed_dim
+            return self.proj_dim * 2
         if self.x_encoder_type == "vjepa":
             return self.jepa_embed_dim
         raise ValueError(
