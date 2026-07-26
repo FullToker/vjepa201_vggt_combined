@@ -10,12 +10,20 @@ Architecture (paper: arXiv 2512.10942v2)
         → (B, S, D_fused)
 
     vis_proj  → (B, S, D_pred)
+        + modality_embed[visual] + frame_embed(frame_ids)   (no order/distance)
 
-    + modality_embed (visual/query) + frame_embed (per-frame group tag)
-    query_in_proj(query tokens) + modality_embed + query_pos_embed (sincos, word order)
+    query_in_proj(embed_tokens(query_ids))  → (B, L, D_pred)
+        + modality_embed[query] (+ query_pos_embed sincos — toy path only;
+                                    LlamaPredictor's RoPE covers word order)
 
     cat [visual tokens | query tokens]
-        → Predictor (bidirectional TransformerEncoder)
+        → Predictor:
+            - query_model_name == "toy": bidirectional nn.TransformerEncoder
+            - otherwise: LlamaPredictor — last predictor_llama_layers decoder
+              layers of query_model_name, non-causal, RoPE.
+              position_ids = [0]*S + arange(1, L+1)  (all visual tokens share
+              one position → zero relative RoPE rotation among frames; query
+              tokens get normal sequential positions)
         → pool over query positions
         → pred_proj  → (B, D_shared)   ← predicted embedding
 
@@ -30,11 +38,13 @@ Trainable parameters:
     - vis_proj, query_in_proj                (main LR)
     - modality_embed, frame_embed            (main LR)
     - predictor, pred_proj                   (main LR)
+      (LlamaPredictor: only the kept decoder layers + final norm are
+       trainable; its embed_tokens stays frozen)
     - y_encoder, y_proj                      (y_encoder_lr_multiplier × main LR)
 
 Frozen parameters:
     - FrozenVGGT, FrozenJEPA (inside FusionGV)
-    - query_encoder
+    - query_encoder (toy path) / predictor.embed_tokens (llama path)
 
 Usage
 -----
@@ -61,6 +71,7 @@ import torch.nn as nn
 from app.vjepa_2_1.models.utils.pos_embs import get_1d_sincos_pos_embed
 from fusion_gv.config import FusionConfig
 from fusion_gv.grounding_head import GroundingHead
+from fusion_gv.llama_predictor import LlamaPredictor
 from fusion_gv.model import build_x_encoder
 
 # Max frames a single forward pass can tag with frame_embed (index range [0, _S_MAX)).
@@ -146,15 +157,21 @@ class GVJEPAConfig:
     # Visual fusion encoder
     fusion: FusionConfig = field(default_factory=FusionConfig)
 
-    # Predictor (bidirectional transformer)
-    predictor_hidden_size: int = 512
-    predictor_layers: int = 6
-    predictor_heads: int = 8
-    predictor_ffn_mult: int = 4
-    predictor_dropout: float = 0.0
+    # Predictor. When query_model_name == "toy": a small bidirectional
+    # nn.TransformerEncoder sized by the fields below (fast, no download).
+    # Otherwise: LlamaPredictor — last predictor_llama_layers decoder layers
+    # of query_model_name, non-causal, RoPE. hidden size is then derived from
+    # the checkpoint (2048 for Llama-3.2-1B), predictor_hidden_size is ignored.
+    predictor_hidden_size: int = 512    # toy path only
+    predictor_layers: int = 6           # toy path only
+    predictor_heads: int = 8            # toy path only
+    predictor_ffn_mult: int = 4         # toy path only
+    predictor_dropout: float = 0.0      # toy path only
+    predictor_llama_layers: int = 8     # llama path only
 
-    # Query encoder (frozen; conditions the predictor)
-    # "toy" for offline tests; otherwise a HuggingFace model name
+    # Query encoder (frozen; conditions the predictor). "toy" for offline
+    # tests; otherwise a HuggingFace Llama checkpoint name — also used as the
+    # predictor backbone (see predictor_llama_layers above).
     query_model_name: str = "toy"
     max_query_tokens: int = 64
 
@@ -197,7 +214,6 @@ class FusionGVJEPA(nn.Module):
             config = GVJEPAConfig()
         self.config = config
 
-        h = config.predictor_hidden_size
         # Visual dim is configurable so future fusion projections do not require
         # changing this head. Defaults: fusion_gv=2048, vjepa=1024.
         D_fused = config.fusion.visual_dim
@@ -205,18 +221,12 @@ class FusionGVJEPA(nn.Module):
         # ── X-encoder (visual) ───────────────────────────────────────────────
         self.x_encoder = build_x_encoder(config.fusion)
 
-        # Project fused spatial features to predictor dim
-        self.vis_proj = nn.Linear(D_fused, h)
+        # ── Predictor + query tokenizer ───────────────────────────────────────
+        self._use_llama_predictor = config.query_model_name != "toy"
 
-        # ── Query encoder (frozen) ───────────────────────────────────────────
-        if config.query_model_name == "toy":
-            self.query_tokenizer = _ToyTokenizer()
-            self.query_encoder: nn.Module = _ToyTextEncoder(hidden_size=128)
-        else:
-            try:
-                from transformers import AutoModel, AutoTokenizer
-            except ImportError as exc:
-                raise ImportError("transformers is required for non-toy query encoder") from exc
+        if self._use_llama_predictor:
+            from transformers import AutoTokenizer
+
             self.query_tokenizer = AutoTokenizer.from_pretrained(
                 config.query_model_name,
                 use_fast=True,
@@ -224,16 +234,39 @@ class FusionGVJEPA(nn.Module):
             )
             if self.query_tokenizer.pad_token is None:
                 self.query_tokenizer.pad_token = self.query_tokenizer.eos_token
-            self.query_encoder = AutoModel.from_pretrained(
-                config.query_model_name,
-                cache_dir=config.hf_cache_dir,
+
+            # Last-8-layer Llama predictor. Also owns the frozen embed_tokens
+            # used for query-token lookup (one checkpoint load, not two).
+            self.predictor = LlamaPredictor(
+                llama_name=config.query_model_name,
+                n_keep_layers=config.predictor_llama_layers,
+                hf_cache_dir=config.hf_cache_dir,
             )
+            h = self.predictor.hidden_size   # forced by the checkpoint (2048)
+            self.query_in_proj = nn.Identity()
+        else:
+            self.query_tokenizer = _ToyTokenizer()
+            self.query_encoder: nn.Module = _ToyTextEncoder(hidden_size=128)
+            for p in self.query_encoder.parameters():
+                p.requires_grad_(False)
 
-        for p in self.query_encoder.parameters():
-            p.requires_grad_(False)
+            h = config.predictor_hidden_size
+            q_embed_dim = self.query_encoder.get_input_embeddings().embedding_dim
+            self.query_in_proj = nn.Linear(q_embed_dim, h)
 
-        q_embed_dim = self.query_encoder.get_input_embeddings().embedding_dim
-        self.query_in_proj = nn.Linear(q_embed_dim, h)
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=h,
+                nhead=config.predictor_heads,
+                dim_feedforward=h * config.predictor_ffn_mult,
+                dropout=config.predictor_dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.predictor = nn.TransformerEncoder(enc_layer, num_layers=config.predictor_layers)
+
+        # Project fused spatial features to predictor dim
+        self.vis_proj = nn.Linear(D_fused, h)
 
         # ── Embeddings added before the predictor ─────────────────────────────
         # modality_embed: 0=visual, 1=query — lets the predictor tell the two
@@ -245,24 +278,15 @@ class FusionGVJEPA(nn.Module):
         # frame sampling here carries no temporal meaning, so this is a pure
         # "same-group" marker, not a position encoding.
         self.frame_embed = nn.Embedding(_S_MAX, h)
-        # query_pos_embed: sincos, word order matters for query tokens. Fixed
-        # (non-trainable) buffer sized to max_query_tokens, sliced to L at runtime.
-        query_pos_np = get_1d_sincos_pos_embed(h, config.max_query_tokens)
-        self.register_buffer(
-            "query_pos_embed", torch.from_numpy(query_pos_np).float(), persistent=False
-        )
+        # query_pos_embed: sincos, word order for query tokens. Only needed on
+        # the toy path — LlamaPredictor's own RoPE (recomputed every layer)
+        # already encodes query word order, so it's redundant there.
+        if not self._use_llama_predictor:
+            query_pos_np = get_1d_sincos_pos_embed(h, config.max_query_tokens)
+            self.register_buffer(
+                "query_pos_embed", torch.from_numpy(query_pos_np).float(), persistent=False
+            )
 
-        # ── Predictor (bidirectional, no causal mask) ────────────────────────
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=h,
-            nhead=config.predictor_heads,
-            dim_feedforward=h * config.predictor_ffn_mult,
-            dropout=config.predictor_dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.predictor = nn.TransformerEncoder(enc_layer, num_layers=config.predictor_layers)
         self.pred_proj = nn.Linear(h, config.shared_embed_dim)
 
         # ── Y-encoder (target, trainable with slow LR) ───────────────────────
@@ -371,17 +395,30 @@ class FusionGVJEPA(nn.Module):
         q_tok = self._tokenize(
             self.query_tokenizer, queries, self.config.max_query_tokens, device
         )
-        q_emb = self.query_encoder.get_input_embeddings()(q_tok["input_ids"])  # (B, L, q_dim)
+        if self._use_llama_predictor:
+            q_emb = self.predictor.get_input_embeddings()(q_tok["input_ids"])  # (B, L, h), frozen
+        else:
+            q_emb = self.query_encoder.get_input_embeddings()(q_tok["input_ids"])  # (B, L, q_dim)
         q_emb = self.query_in_proj(q_emb)                                      # (B, L, h)
         q_mask = q_tok["attention_mask"]                                        # (B, L)
 
         L = q_emb.shape[1]
-        q_emb = q_emb + self.modality_embed.weight[1] + self.query_pos_embed[:L]  # (B,L,h)
+        q_emb = q_emb + self.modality_embed.weight[1]                          # (B,L,h)
+        if not self._use_llama_predictor:
+            q_emb = q_emb + self.query_pos_embed[:L]
 
         x = torch.cat([vis, q_emb], dim=1)                              # (B, S+L, h)
         vis_mask = torch.ones(B, S, device=device, dtype=q_mask.dtype)
-        full_mask = torch.cat([vis_mask, q_mask], dim=1)
-        x = self.predictor(x, src_key_padding_mask=(full_mask == 0))    # (B, S+L, h)
+        full_mask = torch.cat([vis_mask, q_mask], dim=1)                # (B, S+L), 1=valid
+
+        if self._use_llama_predictor:
+            position_ids = torch.cat([
+                torch.zeros(S, dtype=torch.long, device=device),
+                torch.arange(1, L + 1, dtype=torch.long, device=device),
+            ])
+            x = self.predictor(x, position_ids=position_ids, attention_mask=full_mask)
+        else:
+            x = self.predictor(x, src_key_padding_mask=(full_mask == 0))    # (B, S+L, h)
 
         x_vis = x[:, :S, :]                                             # (B, S, h)
 

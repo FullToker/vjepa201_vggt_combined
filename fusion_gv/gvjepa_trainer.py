@@ -544,11 +544,14 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     g = cfg.get("grounding", {})
     model_cfg = GVJEPAConfig(
         fusion=fusion_cfg,
-        predictor_hidden_size=m["predictor_hidden_size"],
-        predictor_layers=m["predictor_layers"],
-        predictor_heads=m["predictor_heads"],
-        predictor_ffn_mult=m["predictor_ffn_mult"],
+        # toy predictor path only (ignored when query_model_name != "toy")
+        predictor_hidden_size=m.get("predictor_hidden_size", 512),
+        predictor_layers=m.get("predictor_layers", 6),
+        predictor_heads=m.get("predictor_heads", 8),
+        predictor_ffn_mult=m.get("predictor_ffn_mult", 4),
         predictor_dropout=m.get("predictor_dropout", 0.0),
+        # llama predictor path only (ignored when query_model_name == "toy")
+        predictor_llama_layers=m.get("predictor_llama_layers", 8),
         query_model_name=m.get("query_model_name", "toy"),
         max_query_tokens=m.get("max_query_tokens", 64),
         y_encoder_name=m.get("y_encoder_name", "toy"),
