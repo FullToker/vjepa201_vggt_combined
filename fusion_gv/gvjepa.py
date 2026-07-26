@@ -11,6 +11,9 @@ Architecture (paper: arXiv 2512.10942v2)
 
     vis_proj  → (B, S, D_pred)
 
+    + modality_embed (visual/query) + frame_embed (per-frame group tag)
+    query_in_proj(query tokens) + modality_embed + query_pos_embed (sincos, word order)
+
     cat [visual tokens | query tokens]
         → Predictor (bidirectional TransformerEncoder)
         → pool over query positions
@@ -25,6 +28,7 @@ Architecture (paper: arXiv 2512.10942v2)
 Trainable parameters:
     - fusion module inside FusionGV          (main LR)
     - vis_proj, query_in_proj                (main LR)
+    - modality_embed, frame_embed            (main LR)
     - predictor, pred_proj                   (main LR)
     - y_encoder, y_proj                      (y_encoder_lr_multiplier × main LR)
 
@@ -54,9 +58,13 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 
+from app.vjepa_2_1.models.utils.pos_embs import get_1d_sincos_pos_embed
 from fusion_gv.config import FusionConfig
 from fusion_gv.grounding_head import GroundingHead
 from fusion_gv.model import build_x_encoder
+
+# Max frames a single forward pass can tag with frame_embed (index range [0, _S_MAX)).
+_S_MAX = 33
 
 
 # ── Toy components for offline / unit-test use ─────────────────────────────────
@@ -227,6 +235,23 @@ class FusionGVJEPA(nn.Module):
         q_embed_dim = self.query_encoder.get_input_embeddings().embedding_dim
         self.query_in_proj = nn.Linear(q_embed_dim, h)
 
+        # ── Embeddings added before the predictor ─────────────────────────────
+        # modality_embed: 0=visual, 1=query — lets the predictor tell the two
+        # streams apart (it otherwise has no positional signal at all).
+        self.modality_embed = nn.Embedding(2, h)
+        # frame_embed: per-frame group tag. Same row added to every token of a
+        # given frame (K=1 today via mean-pool; K>1 later via a resampler would
+        # broadcast the same row over all K). No order/distance semantics —
+        # frame sampling here carries no temporal meaning, so this is a pure
+        # "same-group" marker, not a position encoding.
+        self.frame_embed = nn.Embedding(_S_MAX, h)
+        # query_pos_embed: sincos, word order matters for query tokens. Fixed
+        # (non-trainable) buffer sized to max_query_tokens, sliced to L at runtime.
+        query_pos_np = get_1d_sincos_pos_embed(h, config.max_query_tokens)
+        self.register_buffer(
+            "query_pos_embed", torch.from_numpy(query_pos_np).float(), persistent=False
+        )
+
         # ── Predictor (bidirectional, no causal mask) ────────────────────────
         enc_layer = nn.TransformerEncoderLayer(
             d_model=h,
@@ -338,6 +363,10 @@ class FusionGVJEPA(nn.Module):
         pooled_vis, spatial = self._pool_visual(images_vggt, images_jepa)
         vis = self.vis_proj(pooled_vis)   # (B, S, h)
         S = vis.shape[1]
+        assert S <= _S_MAX, f"frame_embed only covers {_S_MAX} frames, got S={S}"
+
+        frame_ids = torch.arange(S, device=device)
+        vis = vis + self.modality_embed.weight[0] + self.frame_embed(frame_ids)  # (B,S,h)
 
         q_tok = self._tokenize(
             self.query_tokenizer, queries, self.config.max_query_tokens, device
@@ -345,6 +374,9 @@ class FusionGVJEPA(nn.Module):
         q_emb = self.query_encoder.get_input_embeddings()(q_tok["input_ids"])  # (B, L, q_dim)
         q_emb = self.query_in_proj(q_emb)                                      # (B, L, h)
         q_mask = q_tok["attention_mask"]                                        # (B, L)
+
+        L = q_emb.shape[1]
+        q_emb = q_emb + self.modality_embed.weight[1] + self.query_pos_embed[:L]  # (B,L,h)
 
         x = torch.cat([vis, q_emb], dim=1)                              # (B, S+L, h)
         vis_mask = torch.ones(B, S, device=device, dtype=q_mask.dtype)
