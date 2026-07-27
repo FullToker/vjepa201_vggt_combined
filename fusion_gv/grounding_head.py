@@ -1,12 +1,18 @@
 """
 GroundingHead: multi-layer cross-attention grounding module.
 
-Q  = predictor visual summary  (B*S, 1,    h)   — query-conditioned per-view token
+Q  = predictor visual summary  (B*S, K,    h)   — K query-conditioned tokens per frame
+                                                    (K=1 with today's mean-pooled predictor
+                                                     input; K>1 if a future resampler keeps
+                                                     multiple tokens per frame)
 KV = projected spatial feat    (B*S, 1369, h)   — FusionGV patch features before pooling
 
 Each CrossAttnLayer refines Q across spatial KV.
-Final layer returns raw (pre-softmax) logits (B*S, H, 1, 1369)
-→ mean over heads → squeeze → reshape → (B*S, patch_grid, patch_grid) heatmap.
+Final layer returns raw (pre-softmax) logits (B*S, H, K, 1369)
+→ mean over heads → mean over K → reshape → (B*S, patch_grid, patch_grid) heatmap.
+Averaging over K keeps the logit scale independent of K (sum would scale linearly
+with K and push BCEWithLogitsLoss into its saturated regime, and would require
+re-tuning grounding_pos_weight every time K changes).
 Train with sigmoid + BCE against bbox-derived binary patch mask.
 """
 
@@ -89,15 +95,15 @@ class GroundingHead(nn.Module):
     Grounding head: spatial skip-connect + multi-layer cross-attention.
 
     Flow:
-        spatial (B,S,N,D_f) → spatial_proj → kv (B*S, N, h)
-        summary (B,S,h)     → reshape      → q  (B*S, 1, h)
-                                    ↓
-                        CrossAttnLayer × num_layers
-                        each layer: q attends kv, q refined
-                                    ↓
-                    last layer raw logits (B*S, 1, N)
-                        → squeeze(1) → (B*S, N)
-                        → reshape    → (B*S, G, G)
+        spatial (B,S,N,D_f)   → spatial_proj → kv (B*S, N, h)
+        summary (B,S*K,h)     → reshape      → q  (B*S, K, h)
+                                      ↓
+                          CrossAttnLayer × num_layers
+                          each layer: q attends kv, q refined
+                                      ↓
+                      last layer raw logits (B*S, K, N)
+                          → mean(dim=1) over K → (B*S, N)
+                          → reshape             → (B*S, G, G)
 
     G = patch_grid = img_size / patch_size = 518 / 14 = 37.
 
@@ -135,21 +141,28 @@ class GroundingHead(nn.Module):
 
     def forward(
         self,
-        summary: torch.Tensor,   # (B, S, h)
+        summary: torch.Tensor,   # (B, S*K, h) — K tokens per frame, K=1 today
         spatial: torch.Tensor,   # (B, S, N_patches, D_f)
     ) -> torch.Tensor:
         """
         Returns:
-            logits: (B*S, patch_grid, patch_grid)  raw pre-softmax attention logits
+            logits: (B*S, patch_grid, patch_grid)  raw pre-softmax attention logits,
+                     averaged over the K tokens of each frame
         """
         B, S, N, D_f = spatial.shape
+        assert summary.shape[1] % S == 0, (
+            f"summary length {summary.shape[1]} must be a multiple of S={S}"
+        )
+        K = summary.shape[1] // S
 
-        q  = summary.reshape(B * S, 1, summary.shape[-1])
+        # summary must be laid out frame-major: [frame0_tok0..K-1, frame1_tok0..K-1, ...]
+        q  = summary.reshape(B * S, K, summary.shape[-1])       # (B*S, K, h)
         kv = self.spatial_proj(spatial.reshape(B * S, N, D_f))  # (B*S, N, h)
 
         raw_logits = None
         for i, layer in enumerate(self.layers):
             q, raw_logits = layer(q, kv, return_raw_logits=(i == self.num_layers - 1))
 
-        # raw_logits: (B*S, 1, N) → (B*S, G, G)
-        return raw_logits.squeeze(1).reshape(B * S, self.patch_grid, self.patch_grid)
+        # raw_logits: (B*S, K, N) → mean over K (not sum: keeps logit scale K-invariant) → (B*S, G, G)
+        raw_logits = raw_logits.mean(dim=1)
+        return raw_logits.reshape(B * S, self.patch_grid, self.patch_grid)
