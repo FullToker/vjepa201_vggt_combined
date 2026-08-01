@@ -11,9 +11,10 @@ Each CrossAttnLayer refines Q across spatial KV.
 Final layer returns raw (pre-softmax) logits (B*S, H, K, 1369)
 → mean over heads → mean over K → reshape → (B*S, patch_grid, patch_grid) heatmap.
 Averaging over K keeps the logit scale independent of K (sum would scale linearly
-with K and push BCEWithLogitsLoss into its saturated regime, and would require
-re-tuning grounding_pos_weight every time K changes).
-Train with sigmoid + BCE against bbox-derived binary patch mask.
+with K and push the loss into its saturated regime, and would require
+re-tuning focal_alpha/focal_beta every time K changes).
+Train with sigmoid + CenterNet-style modified focal loss against a bbox-derived
+Gaussian heatmap (peak 1.0 at box center) — see gvjepa_trainer.modified_focal_loss.
 """
 
 from __future__ import annotations
@@ -108,8 +109,9 @@ class GroundingHead(nn.Module):
     G = patch_grid = img_size / patch_size = 518 / 14 = 37.
 
     Caller loss:
-        F.binary_cross_entropy_with_logits(logits, gt_mask)
-        gt_mask: (B*S, G, G) binary float, derived from projected 2D bbox.
+        gvjepa_trainer.modified_focal_loss(logits, gt_heatmap)
+        gt_heatmap: (B*S, G, G) unnormalized Gaussian float (peak 1.0 at box
+        center), derived from projected 2D bbox via boxes_to_gaussian_heatmap.
 
     Args:
         spatial_dim:  D_f from FusionGV (2048 by default, = 2 * proj_dim)

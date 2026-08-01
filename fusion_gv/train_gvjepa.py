@@ -166,8 +166,8 @@ def main() -> None:
             log_every=tcfg.get("log_every", 20),
             save_every=tcfg.get("save_every", 0),
             grounding_loss_weight=gcfg.get("loss_weight", 0.1),
-            grounding_pos_weight=gcfg.get("pos_weight", 5.0),
-            suppression_loss_weight=gcfg.get("suppression_loss_weight", 0.1),
+            focal_alpha=gcfg.get("focal_alpha", 2.0),
+            focal_beta=gcfg.get("focal_beta", 4.0),
             mlflow_logger=mlflow_logger,
             accelerator=accelerator,
         )

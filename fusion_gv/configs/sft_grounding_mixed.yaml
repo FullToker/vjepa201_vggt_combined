@@ -3,7 +3,7 @@
 #
 # Loss routing (automatic, based on batch "boxes" field):
 #   SPAR rows     (boxes=None) → InfoNCE only
-#   EmbodiedScan  (boxes=[...]) → InfoNCE + grounding_loss_weight × BCE
+#   EmbodiedScan  (boxes=[...]) → InfoNCE + grounding_loss_weight × CenterNet-style focal loss
 #
 # Run (normal):
 #   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/sft_grounding_mixed.yaml
@@ -55,10 +55,14 @@ grounding:
   ffn_mult:    4
   dropout:     0.0
   patch_grid:  37        # 518 / 14 = 37
-  loss_weight:            0.1   # grounding BCE contribution to total loss
-  pos_weight:             5.0   # BCE positive-class weight (background >> foreground)
-  suppression_loss_weight: 0.1  # MSE-to-zero weight for invisible views
-  batch_ratio: 5                # 1 grounding batch per 5 SPAR batches
+  loss_weight: 0.1        # grounding focal-loss contribution to total loss
+                           # NOTE: scale changed vs the old BCE — CenterNet-style
+                           # focal loss starts much larger (per-batch normalized
+                           # by positive-point count, not per-pixel mean); re-sweep
+                           # this before trusting 0.1 carries over.
+  focal_alpha: 2.0         # CenterNet modified focal loss (Zhou et al. 2019)
+  focal_beta:  4.0         # higher = softer penalty near box center
+  batch_ratio: 5           # 1 grounding batch per 5 SPAR batches
 
 
 # ── Dataset (alternating: SPAR SFT ↔ EmbodiedScan grounding) ─────────────────

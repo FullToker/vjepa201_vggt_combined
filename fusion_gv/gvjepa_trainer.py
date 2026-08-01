@@ -52,34 +52,89 @@ from fusion_gv.preprocess import preprocess
 
 # ── Grounding helpers ──────────────────────────────────────────────────────────
 
-def boxes_to_patch_mask(
+def boxes_to_gaussian_heatmap(
     boxes: list[list[float] | None],
     patch_grid: int = 37,
     patch_size: int = 14,
+    min_sigma: float = 0.5,
 ) -> torch.Tensor:
-    """Convert per-view 2D boxes (518×518 space) to binary patch masks.
+    """Convert per-view 2D boxes (518×518 space) to unnormalized Gaussian heatmaps
+    (CenterNet-style ground truth — "Objects as Points", Zhou et al. 2019).
+
+    Peak value 1.0 sits on the box's center patch, decaying outward with sigma
+    set from box extent (±3σ ≈ box half-width/height). The center is rounded to
+    its nearest grid cell before the Gaussian is evaluated so exactly one pixel
+    hits 1.0 exactly — modified_focal_loss's positive-point mask depends on that
+    exact equality to find it. Frames with box=None (target not visible in this
+    view) get an all-zero heatmap.
 
     Args:
         boxes:      list of S entries, each [x1,y1,x2,y2] or None (not visible)
         patch_grid: G, default 37
         patch_size: pixels per patch, default 14
+        min_sigma:  floor on sigma (patch units) so tiny boxes don't collapse
+                    to a near-zero-width Gaussian
 
     Returns:
-        masks: (S, G, G) float32 binary patch mask
+        heatmaps: (S, G, G) float32, values in [0, 1], peak 1.0 at box center
     """
-    masks = []
+    G = patch_grid
+    ys = torch.arange(G, dtype=torch.float32).unsqueeze(1)   # (G,1)
+    xs = torch.arange(G, dtype=torch.float32).unsqueeze(0)   # (1,G)
+
+    heatmaps = []
     for box in boxes:
-        mask = torch.zeros(patch_grid, patch_grid, dtype=torch.float32)
+        hm = torch.zeros(G, G, dtype=torch.float32)
         if box is not None:
             x1, y1, x2, y2 = box
-            px1 = max(0, int(x1 / patch_size))
-            py1 = max(0, int(y1 / patch_size))
-            px2 = min(patch_grid - 1, int(x2 / patch_size))
-            py2 = min(patch_grid - 1, int(y2 / patch_size))
+            px1, py1 = x1 / patch_size, y1 / patch_size
+            px2, py2 = x2 / patch_size, y2 / patch_size
             if px2 > px1 and py2 > py1:
-                mask[py1:py2 + 1, px1:px2 + 1] = 1.0
-        masks.append(mask)
-    return torch.stack(masks)   # (S, G, G)
+                cx = min(max(round((px1 + px2) / 2.0), 0), G - 1)
+                cy = min(max(round((py1 + py2) / 2.0), 0), G - 1)
+                sigma_x = max((px2 - px1) / 6.0, min_sigma)
+                sigma_y = max((py2 - py1) / 6.0, min_sigma)
+                hm = torch.exp(-(
+                    (xs - cx) ** 2 / (2 * sigma_x ** 2)
+                    + (ys - cy) ** 2 / (2 * sigma_y ** 2)
+                ))
+        heatmaps.append(hm)
+    return torch.stack(heatmaps)   # (S, G, G)
+
+
+def modified_focal_loss(
+    logits: torch.Tensor,       # (N, G, G) raw pre-sigmoid logits
+    gt_heatmap: torch.Tensor,   # (N, G, G) unnormalized Gaussian target, peak=1.0
+    alpha: float = 2.0,
+    beta: float = 4.0,
+    eps: float = 1e-4,
+) -> torch.Tensor:
+    """CenterNet-style modified focal loss (CornerNet, Law & Deng 2018 /
+    "Objects as Points", Zhou et al. 2019).
+
+    Positive points (gt_heatmap == 1.0, i.e. box centers) use
+    -(1-p)^alpha * log(p). Every other point uses
+    -(1-Y)^beta * p^alpha * log(1-p), so points near a center are penalized
+    less than far-away background, and confidently-correct background points
+    are penalized less than confidently-wrong ones (standard focal behavior).
+
+    Frames with no visible target (gt_heatmap all-zero) fall entirely into the
+    negative branch with full weight ((1-Y)^beta = 1 everywhere) — this alone
+    reproduces what a separate "suppression loss" would do, so no extra term
+    is needed for invisible views.
+
+    Normalizes by the number of positive (center) points in the batch, clamped
+    to >= 1 so an all-invisible batch doesn't divide by zero.
+    """
+    p = torch.sigmoid(logits).clamp(eps, 1 - eps)
+    pos_mask = gt_heatmap.eq(1.0).float()
+    neg_mask = 1.0 - pos_mask
+
+    pos_loss = -torch.log(p) * (1 - p).pow(alpha) * pos_mask
+    neg_loss = -torch.log(1 - p) * p.pow(alpha) * (1 - gt_heatmap).pow(beta) * neg_mask
+
+    num_pos = pos_mask.sum().clamp_min(1.0)
+    return (pos_loss.sum() + neg_loss.sum()) / num_pos
 
 
 # ── InfoNCE loss (bidirectional, paper Sec. 2) ─────────────────────────────────
@@ -251,8 +306,8 @@ class GVJEPATrainer:
         log_every: int = 20,
         save_every: int = 1000,
         grounding_loss_weight: float = 0.1,
-        grounding_pos_weight: float = 5.0,
-        suppression_loss_weight: float = 0.1,
+        focal_alpha: float = 2.0,
+        focal_beta: float = 4.0,
         mlflow_logger=None,
         accelerator=None,
     ) -> None:
@@ -276,9 +331,9 @@ class GVJEPATrainer:
         self.log_every = log_every
         self.save_every = save_every
         self.mlflow_logger = mlflow_logger
-        self.grounding_loss_weight   = grounding_loss_weight
-        self.grounding_pos_weight    = grounding_pos_weight
-        self.suppression_loss_weight = suppression_loss_weight
+        self.grounding_loss_weight = grounding_loss_weight
+        self.focal_alpha           = focal_alpha
+        self.focal_beta            = focal_beta
         if self.accelerator.is_main_process:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -308,7 +363,7 @@ class GVJEPATrainer:
         return path
 
     def _grounding_step(self, batch: dict) -> tuple[torch.Tensor, float]:
-        """Forward + grounding BCE only. Returns (loss, grounding_loss_val)."""
+        """Forward + grounding modified-focal-loss only. Returns (loss, grounding_loss_val)."""
         device = self.accelerator.device
         images_vggt = batch["images_vggt"].to(device, non_blocking=True)
         images_jepa = batch["images_jepa"].to(device, non_blocking=True)
@@ -323,29 +378,23 @@ class GVJEPATrainer:
                 and any(b is not None for b in boxes_batch)
             ):
                 patch_grid = raw_model.config.grounding_patch_grid
-                gt_masks = torch.stack([
-                    boxes_to_patch_mask(b, patch_grid)
+                gt_heatmaps = torch.stack([
+                    boxes_to_gaussian_heatmap(b, patch_grid)
                     if b is not None
                     else torch.zeros(images_vggt.shape[1], patch_grid, patch_grid)
                     for b in boxes_batch
                 ]).to(device)
-                B_g, S_g = gt_masks.shape[:2]
-                gt_flat = gt_masks.reshape(B_g * S_g, patch_grid, patch_grid)
-                valid = gt_flat.reshape(B_g * S_g, -1).sum(dim=-1) > 0
+                B_g, S_g = gt_heatmaps.shape[:2]
+                gt_flat = gt_heatmaps.reshape(B_g * S_g, patch_grid, patch_grid)
 
                 out = self.model(images_vggt, images_jepa, batch["query"], mode="grounding")
                 logits = out["grounding_logits"]
 
-                if valid.any():
-                    pw = torch.tensor(self.grounding_pos_weight, device=device, dtype=logits.dtype)
-                    grounding_loss = F.binary_cross_entropy_with_logits(
-                        logits[valid], gt_flat[valid], pos_weight=pw
-                    )
-
-                invisible = ~valid
-                if invisible.any() and self.suppression_loss_weight > 0:
-                    suppression_loss = logits[invisible].pow(2).mean()
-                    grounding_loss = grounding_loss + self.suppression_loss_weight * suppression_loss
+                # invisible-view rows (gt_flat all-zero) fall entirely into the
+                # negative branch of the focal loss — no separate handling needed.
+                grounding_loss = modified_focal_loss(
+                    logits, gt_flat, alpha=self.focal_alpha, beta=self.focal_beta
+                )
 
             loss = self.grounding_loss_weight * grounding_loss / self.grad_accum_steps
 

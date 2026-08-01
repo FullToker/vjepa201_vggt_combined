@@ -58,8 +58,8 @@ grounding:
   dropout:                 0.0
   patch_grid:              37
   loss_weight:             0.1
-  pos_weight:              5.0
-  suppression_loss_weight: 0.1
+  focal_alpha:             2.0   # CenterNet modified focal loss (Zhou et al. 2019)
+  focal_beta:              4.0
   batch_ratio:             2    # more frequent grounding for faster validation
 
 
