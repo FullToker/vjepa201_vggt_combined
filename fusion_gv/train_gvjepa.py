@@ -115,6 +115,9 @@ def main() -> None:
     _set_seed(tcfg.get("seed", 42) + accelerator.process_index)
 
     model            = build_model_from_config(cfg)
+    if cfg.get("init_vljepa_ckpt"):
+        from fusion_gv.load_vljepa_init import load_predictor_and_y_encoder_from_vljepa
+        load_predictor_and_y_encoder_from_vljepa(model, cfg["init_vljepa_ckpt"])
     loader           = build_loader_from_config(cfg)
     grounding_loader = build_grounding_loader_from_config(cfg)
     optimizer, scheduler = build_optimizer_and_scheduler_from_config(model, cfg)

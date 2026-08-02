@@ -1,0 +1,124 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FusionGVJEPA  ·  SFT stage  ·  warm-started from an open-vljepa checkpoint
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Same architecture as sft_vjepa.yaml (x_encoder_type=vjepa, the only mode
+# whose visual_dim=1024 matches open-vljepa's single V-JEPA2 encoder). The
+# only addition is `init_vljepa_ckpt` below: before training starts,
+# train_gvjepa.py loads predictor.layers/norm/vis_proj/pred_proj and
+# y_encoder/y_proj from that checkpoint (see fusion_gv/load_vljepa_init.py
+# for exactly which tensors transfer and which stay at random init —
+# modality_embed, frame_embed, grounding_head have no open-vljepa
+# counterpart).
+#
+# Get a checkpoint:
+#   huggingface-cli download cun-bjy/open-vljepa best.pt --local-dir ./ckpts/open_vljepa
+#
+# Run:
+#   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Path to the open-vljepa checkpoint used to warm-start predictor + y_encoder.
+# Remove/comment this line to fall back to a from-scratch predictor/y_encoder
+# (identical to sft_vjepa.yaml).
+init_vljepa_ckpt: ./ckpts/open_vljepa/best.pt
+
+
+# ── Frozen V-JEPA visual encoder ─────────────────────────────────────────────
+fusion:
+  # Must stay "vjepa" — only this mode's visual_dim (1024) matches
+  # open-vljepa's vis_proj shape.
+  x_encoder_type: vjepa
+  x_encoder_output_dim: null
+
+  vggt_ckpt: ./ckpts/vggt.pt
+  jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
+
+  vggt_img_size:       518
+  vggt_patch_size:     14
+  vggt_embed_dim:      1024
+  vggt_out_dim:        2048
+  vggt_num_patches:    1369
+  jepa_img_size:       384
+  jepa_patch_size:     16
+  jepa_embed_dim:      1024
+  jepa_num_patches:    576
+  proj_dim: 1024
+
+
+# ── Predictor + projection heads ──────────────────────────────────────────────
+model:
+  predictor_hidden_size: 1024    # toy path only, ignored (llama forces h=2048)
+  predictor_layers:      8
+  predictor_heads:       16
+  predictor_ffn_mult:    4
+  predictor_dropout:     0.1
+
+  # Must match open-vljepa's predictor backbone for the loaded layers to be
+  # meaningful — same checkpoint name, same n_keep_layers.
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens:  256
+
+  # Must match open-vljepa's y_encoder for the loaded weights to be meaningful.
+  y_encoder_name:    google/embeddinggemma-300m
+  max_target_tokens: 256
+
+  # Must equal open-vljepa's proj_dim (1536) — pred_proj/y_proj shapes depend on it.
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+
+  hf_cache_dir: ./ckpts
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+data:
+  train_manifests:
+    - ./data/spar_trian.jsonl
+  num_frames: 4
+  num_workers: 16
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+train:
+  seed:    42
+  device:  cuda
+  precision: bf16
+
+  output_dir: ./outputs/sft_from_vljepa_ckpt
+
+  batch_size:                   128
+  gradient_accumulation_steps:  1
+  max_steps: 45538
+
+  clip_grad_norm: 1.0
+  log_every:  50
+  save_every: 0
+
+  # Lower LR than sft_vjepa.yaml's from-scratch 5e-5 — predictor/y_encoder
+  # are already fine-tuned, this stage is adapting, not learning from zero.
+  learning_rate: 1.0e-5
+  min_lr:        1.0e-6
+  weight_decay:  0.01
+  adam_beta1:    0.9
+  adam_beta2:    0.95
+  adam_eps:      1.0e-8
+
+  scheduler:   cosine
+  temperature: 0.07
+
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
+mlflow:
+  enabled: true
+  env_file: .env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: null
+  log_params: true
+  tags:
+    project: vljepa-fusion-gv
+    variant: warm-start-open-vljepa
