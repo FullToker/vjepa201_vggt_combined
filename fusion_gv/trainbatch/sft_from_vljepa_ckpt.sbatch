@@ -5,14 +5,21 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=150G
 #SBATCH --time=48:00:00
-#SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_%j.out
-#SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_%j.err
+#SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt/%j.out
+#SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt/%j.err
 
 # Single-GPU, single job: train, then VSI-Bench infer, then MMSI-Bench infer,
 # all against fusion_gv/configs/sft_from_vljepa_ckpt.yaml (train + vsi_inference
 # + mmsi_inference sections all live in that one file). Infer steps read the
 # checkpoint train just wrote via train.output_dir -> final.pt (save_every=0,
 # see infer_gvjepa._latest_checkpoint), no path to fill in between steps.
+#
+# All logs for this experiment (Slurm stdout/stderr above, gpu/mem monitor
+# below) live under logs/sft_from_vljepa_ckpt/ instead of flat in logs/.
+# The #SBATCH --output/--error paths above are opened by Slurm before this
+# script body runs, so mkdir -p inside the script is too late for THOSE two --
+# create the folder once before first submission:
+#   mkdir -p /glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt
 #
 # Prereqs (run once, before this job):
 #   sbatch dataset/download_open_vljepa_ckpt.sbatch    # -> ckpts/open_vljepa/best.pt
@@ -24,10 +31,11 @@ set -euo pipefail
 
 ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
+LOG_DIR="$ROOT/logs/sft_from_vljepa_ckpt"
 
-mkdir -p "$ROOT/logs"
+mkdir -p "$LOG_DIR"
 
-MONITOR_LOG="$ROOT/logs/gpu_monitor_${SLURM_JOB_ID}.log"
+MONITOR_LOG="$LOG_DIR/gpu_monitor_${SLURM_JOB_ID}.log"
 
 nvidia-smi dmon -s pucvmet -d 30 > "$MONITOR_LOG" 2>&1 &
 

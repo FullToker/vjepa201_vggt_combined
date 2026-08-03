@@ -5,8 +5,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=150G
 #SBATCH --time=01:00:00
-#SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/overfit_sft_vljepa_%j.out
-#SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/overfit_sft_vljepa_%j.err
+#SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt/overfit_%j.out
+#SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt/overfit_%j.err
 
 # Sanity check before the real sft_from_vljepa_ckpt.sbatch run:
 #   - freezes one batch (128 samples, matches train.batch_size in the yaml so
@@ -16,15 +16,20 @@
 # Not a throughput benchmark — _build_overfit_loader repeats the same fixed
 # batch, so step/sec here does not predict the real run's dataloader-bound
 # throughput.
+#
+# Shares logs/sft_from_vljepa_ckpt/ with the real run (overfit_ prefix keeps
+# filenames apart) -- same one-time-mkdir caveat as sft_from_vljepa_ckpt.sbatch
+# (the #SBATCH --output/--error paths above must exist before submission).
 
 set -euo pipefail
 
 ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
+LOG_DIR="$ROOT/logs/sft_from_vljepa_ckpt"
 
-mkdir -p "$ROOT/logs"
+mkdir -p "$LOG_DIR"
 
-MONITOR_LOG="$ROOT/logs/gpu_monitor_${SLURM_JOB_ID}.log"
+MONITOR_LOG="$LOG_DIR/gpu_monitor_overfit_${SLURM_JOB_ID}.log"
 
 nvidia-smi dmon -s pucvmet -d 30 > "$MONITOR_LOG" 2>&1 &
 
