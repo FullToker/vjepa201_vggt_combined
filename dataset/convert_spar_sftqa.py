@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-output", default="spar_sftqa_train.jsonl", help="Train manifest filename under --output-dir.")
     parser.add_argument("--eval-output", default="spar_sftqa_eval.jsonl", help="Eval manifest filename under --output-dir.")
     parser.add_argument("--split", default="train", help="SPAR split to read. Default: train")
+    parser.add_argument(
+        "--types", nargs="+", default=None,
+        help="Restrict to these SPAR QA type directories (e.g. obj_spatial_relation_oc_mv "
+             "position_matching). Default: all types found under qa_jsonl/<split>/.",
+    )
     parser.add_argument("--num-frames", type=int, default=8, help="Number of RGB frames per output sample. Default: 8")
     parser.add_argument("--only", choices=("both", "train", "eval"), default="both", help="Which manifests to generate. Default: both")
     parser.add_argument("--max-train", type=int, default=None, help="Optional max number of train rows for smoke tests.")
@@ -57,11 +62,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def iter_qa_files(spar_root: Path, split: str, kinds: Sequence[str]) -> Iterable[tuple[str, Path]]:
+def iter_qa_files(
+    spar_root: Path, split: str, kinds: Sequence[str], types: Sequence[str] | None = None,
+) -> Iterable[tuple[str, Path]]:
+    """Yield (qa_kind, qa_path) for every QA file under qa_jsonl/<split>/.
+
+    Path shape: <source>/qa_jsonl/<split>/<type_name>/<kind>/*.jsonl — glob
+    with a fixed type_name per --types entry when given, else '*' (all types).
+    """
+    type_globs = types if types else ["*"]
     for kind in kinds:
-        pattern = f"*/qa_jsonl/{split}/*/{kind}/*.jsonl"
-        for path in sorted(spar_root.glob(pattern)):
-            yield kind, path
+        for type_name in type_globs:
+            pattern = f"*/qa_jsonl/{split}/{type_name}/{kind}/*.jsonl"
+            for path in sorted(spar_root.glob(pattern)):
+                yield kind, path
 
 
 def get_source_name(spar_root: Path, qa_path: Path) -> str:
@@ -207,6 +221,7 @@ def convert_group(
     verify_images: bool,
     include_metadata: bool,
     max_rows: int | None,
+    types: Sequence[str] | None = None,
 ) -> dict[str, object]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     remaining = max_rows
@@ -215,7 +230,7 @@ def convert_group(
     total_skipped = 0
 
     with output_path.open("w", encoding="utf-8") as out_f:
-        for qa_kind, qa_path in iter_qa_files(spar_root, split, kinds):
+        for qa_kind, qa_path in iter_qa_files(spar_root, split, kinds, types=types):
             if remaining is not None and remaining <= 0:
                 break
             total_files += 1
@@ -255,6 +270,7 @@ def main() -> None:
             verify_images=verify_images,
             include_metadata=args.include_metadata,
             max_rows=args.max_train,
+            types=args.types,
         )
     if args.only in ("both", "eval"):
         result["eval"] = convert_group(
@@ -266,6 +282,7 @@ def main() -> None:
             verify_images=verify_images,
             include_metadata=args.include_metadata,
             max_rows=args.max_eval,
+            types=args.types,
         )
 
     print(json.dumps(result, indent=2, ensure_ascii=False))

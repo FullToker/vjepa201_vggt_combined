@@ -12,7 +12,10 @@
 # counterpart).
 #
 # Get a checkpoint:
-#   huggingface-cli download cun-bjy/open-vljepa best.pt --local-dir ./ckpts/open_vljepa
+#   bash dataset/download_open_vljepa_ckpt.sh   (or sbatch dataset/download_open_vljepa_ckpt.sbatch)
+#
+# Get the training data (spar_sftqa_sftvljepa_uni8.jsonl below):
+#   sbatch dataset/convert_spar_sftqa_uni8.sbatch
 #
 # Run:
 #   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
@@ -72,10 +75,18 @@ model:
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
+# InfoNCE (spar) only — no grounding: no `grounding:` section and no
+# data.grounding_manifests below. build_grounding_loader_from_config() returns
+# None when grounding_manifests is unset, so GVJEPATrainer.fit() never enters
+# its grounding branch — every step runs FusionGVJEPA.forward(mode="infonce")
+# against y_target only. grounding_head stays uninstantiated (config.py
+# defaults grounding_enabled=False).
 data:
   train_manifests:
-    - ./data/spar_trian.jsonl
-  num_frames: 4
+    - ./data/spar_sftqa_sftvljepa_uni8.jsonl
+  # Must match --num-frames used by dataset/convert_spar_sftqa_uni8.sbatch —
+  # GVJEPADataset drops any row shorter than this and truncates longer ones.
+  num_frames: 8
   num_workers: 16
   pin_memory: true
   persistent_workers: true
