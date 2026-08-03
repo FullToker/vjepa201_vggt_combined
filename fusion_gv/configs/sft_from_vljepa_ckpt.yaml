@@ -106,9 +106,11 @@ train:
 
   batch_size:                   128
   gradient_accumulation_steps:  1
-  # 3 epochs over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows),
-  # global batch = batch_size(128) * 2 GPUs = 256 -> ~6919 steps/epoch.
-  max_steps: 20757
+  # Single GPU: global batch = batch_size(128) * 1 = 128 -> ~13838 steps/epoch
+  # over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows). Halved from the
+  # previous 3-GPU run's 13839 steps (which was ~3 epochs at global batch 384)
+  # -> ~6920 steps at global batch 128 is ~0.5 epoch, not half the data coverage.
+  max_steps: 6920
 
   clip_grad_norm: 1.0
   log_every:  50
@@ -125,6 +127,48 @@ train:
 
   scheduler:   cosine
   temperature: 0.07
+
+
+# ── Inference: VSI-Bench ──────────────────────────────────────────────────────
+# Read by: python fusion_gv/infer_vsibench.py --config <this file> --config-section vsi_inference
+# Same fusion/model sections as train: above rebuild the identical architecture
+# needed to load the checkpoint this run produces.
+vsi_inference:
+  manifest: ./data/vsibench_manifest.jsonl
+  # Shared per-experiment folder (train.output_dir's basename), vsi/mmsi as
+  # subfolders under it instead of siblings under outputs/inference/.
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt/vsibench
+
+  # null -> resolved from train.output_dir above (latest step_*.pt, or final.pt
+  # if save_every=0 left only that — see infer_gvjepa._latest_checkpoint).
+  checkpoint: null
+
+  mode: auto
+  # No grounding_head on this arch (no `grounding:` section above, x_encoder_type
+  # is vjepa not fusion_gv) -- must be false or infer_vsibench.py raises.
+  save_grounding: false
+
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── Inference: MMSI-Bench ─────────────────────────────────────────────────────
+# Read by: python fusion_gv/infer_mmsibench.py --config <this file> --config-section mmsi_inference
+mmsi_inference:
+  manifest: ./data/mmsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt/mmsibench
+
+  checkpoint: null   # same resolution as vsi_inference.checkpoint above
+
+  mode: auto
+  save_grounding: false   # see vsi_inference note above -- no grounding_head on this arch
+
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
 
 
 # ── MLflow ────────────────────────────────────────────────────────────────────

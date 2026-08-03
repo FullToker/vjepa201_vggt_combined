@@ -8,13 +8,16 @@
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_%j.err
 
-# Single-GPU run: global batch = batch_size(128) * 1 GPU = 128 (half of the
-# previous 2-GPU run's 256), max_steps halved too (see yaml) -> ~0.75 epoch
-# over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows), not the previous 3.
+# Single-GPU, single job: train, then VSI-Bench infer, then MMSI-Bench infer,
+# all against fusion_gv/configs/sft_from_vljepa_ckpt.yaml (train + vsi_inference
+# + mmsi_inference sections all live in that one file). Infer steps read the
+# checkpoint train just wrote via train.output_dir -> final.pt (save_every=0,
+# see infer_gvjepa._latest_checkpoint), no path to fill in between steps.
 #
 # Prereqs (run once, before this job):
-#   sbatch dataset/download_open_vljepa_ckpt.sbatch   # -> ckpts/open_vljepa/best.pt
-#   sbatch dataset/convert_spar_sftqa_uni8.sbatch      # -> data/spar_sftqa_sftvljepa_uni8.jsonl (done)
+#   sbatch dataset/download_open_vljepa_ckpt.sbatch    # -> ckpts/open_vljepa/best.pt
+#   sbatch dataset/convert_spar_sftqa_uni8.sbatch       # -> data/spar_sftqa_sftvljepa_uni8.jsonl
+#   dataset/make_vsibench_manifest.py / make_mmsibench_manifest.py already run # -> data/{vsibench,mmsibench}_manifest.jsonl
 #   sbatch fusion_gv/trainbatch/overfit_sft_from_vljepa_ckpt.sbatch   # OOM/correctness check first
 
 set -euo pipefail
@@ -39,14 +42,29 @@ nvidia-smi dmon -s pucvmet -d 30 > "$MONITOR_LOG" 2>&1 &
     sleep 30
 done ) &
 
-srun singularity exec \
+SIF="srun singularity exec \
     --nv \
     --env-file $ROOT/.env/hf.env \
     --env MLFLOW_ALLOW_FILE_STORE=true \
     --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
-    $CONTAINER \
-    accelerate launch --num_processes 1 \
-        fusion_gv/train_gvjepa.py \
-        --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
+    $CONTAINER"
+
+echo "[train] start $(date)"
+$SIF accelerate launch --num_processes 1 \
+    fusion_gv/train_gvjepa.py \
+    --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
+echo "[train] done $(date)"
+
+echo "[infer-vsibench] start $(date)"
+$SIF python3 fusion_gv/infer_vsibench.py \
+    --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml \
+    --config-section vsi_inference
+echo "[infer-vsibench] done $(date)"
+
+echo "[infer-mmsibench] start $(date)"
+$SIF python3 fusion_gv/infer_mmsibench.py \
+    --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml \
+    --config-section mmsi_inference
+echo "[infer-mmsibench] done $(date)"

@@ -62,9 +62,13 @@ def _latest_checkpoint(output_dir: str | Path) -> Path:
         return int(match.group(1)) if match else -1
 
     candidates = sorted(output_dir.glob("step_*.pt"), key=step_num)
-    if not candidates:
-        raise FileNotFoundError(f"No step_*.pt checkpoints found in: {output_dir}")
-    return candidates[-1]
+    if candidates:
+        return candidates[-1]
+    # save_every=0 configs write only final.pt, no step_*.pt at all.
+    final_path = output_dir / "final.pt"
+    if final_path.exists():
+        return final_path
+    raise FileNotFoundError(f"No step_*.pt or final.pt checkpoints found in: {output_dir}")
 
 
 def _resolve_checkpoint(cfg: dict, override: str | None) -> Path:

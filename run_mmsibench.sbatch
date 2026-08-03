@@ -38,6 +38,7 @@ srun singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
     python3 fusion_gv/infer_mmsibench.py \
-        --config fusion_gv/configs/infer_mmsibench.yaml
+        --config fusion_gv/configs/infer_mmsibench.yaml \
+        --config-section inference
 
 echo "All done $(date)"

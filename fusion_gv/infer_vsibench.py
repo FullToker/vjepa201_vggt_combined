@@ -232,11 +232,19 @@ def main() -> None:
         "--max-per-type", type=int, default=None,
         help="SPAR-only: cap rows per row['type'] via reservoir sampling (unbiased random N). Unset -> no cap.",
     )
+    parser.add_argument(
+        "--config-section", required=True,
+        help="Top-level YAML key to read inference hyperparams from (e.g. 'inference', "
+             "'vsi_inference'). No default -- a merged config can carry more than one "
+             "inference block, so the caller must always say which one. Checkpoint "
+             "resolution is unaffected: it always reads inference.checkpoint / "
+             "train.output_dir regardless of this flag.",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    icfg = cfg.get("inference", {})
+    icfg = cfg.get(args.config_section, {})
 
     manifest_path = Path(args.manifest or icfg.get("manifest", "./data/vsibench_manifest.jsonl"))
     output_dir = Path(args.output_dir or icfg.get("output_dir", "./outputs/inference/vsibench"))
