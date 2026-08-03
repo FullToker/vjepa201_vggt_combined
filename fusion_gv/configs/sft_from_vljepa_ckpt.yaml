@@ -103,7 +103,9 @@ train:
 
   batch_size:                   128
   gradient_accumulation_steps:  1
-  max_steps: 45538
+  # 3 epochs over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows),
+  # global batch = batch_size(128) * 2 GPUs = 256 -> ~6919 steps/epoch.
+  max_steps: 20757
 
   clip_grad_norm: 1.0
   log_every:  50
