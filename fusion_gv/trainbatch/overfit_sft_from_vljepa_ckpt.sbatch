@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=overfit_sft_vljepa
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=150G
 #SBATCH --time=01:00:00
@@ -12,7 +12,7 @@
 #   - freezes one batch (128 samples, matches train.batch_size in the yaml so
 #     per-GPU tensor shapes/memory match the real run) and repeats it
 #   - 200 steps is enough to see loss drop AND to know within ~minutes
-#     whether batch_size=128 (global 256 across 2 GPUs) OOMs
+#     whether batch_size=128 (global 128, single GPU) OOMs
 # Not a throughput benchmark — _build_overfit_loader repeats the same fixed
 # batch, so step/sec here does not predict the real run's dataloader-bound
 # throughput.
@@ -47,7 +47,7 @@ srun singularity exec \
     -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
-    accelerate launch --multi_gpu --num_processes 2 \
+    accelerate launch --num_processes 1 \
         fusion_gv/train_gvjepa.py \
         --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml \
         --overfit \

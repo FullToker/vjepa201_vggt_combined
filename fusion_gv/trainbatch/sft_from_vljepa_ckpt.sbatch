@@ -1,15 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=sft_from_vljepa_ckpt
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=150G
 #SBATCH --time=48:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_%j.err
 
-# Full SFT run: 3 epochs over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows),
-# global batch = batch_size(128) * 2 GPUs = 256 -> max_steps=20757 (see yaml).
+# Single-GPU run: global batch = batch_size(128) * 1 GPU = 128 (half of the
+# previous 2-GPU run's 256), max_steps halved too (see yaml) -> ~0.75 epoch
+# over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows), not the previous 3.
 #
 # Prereqs (run once, before this job):
 #   sbatch dataset/download_open_vljepa_ckpt.sbatch   # -> ckpts/open_vljepa/best.pt
@@ -46,6 +47,6 @@ srun singularity exec \
     -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
-    accelerate launch --multi_gpu --num_processes 2 \
+    accelerate launch --num_processes 1 \
         fusion_gv/train_gvjepa.py \
         --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
