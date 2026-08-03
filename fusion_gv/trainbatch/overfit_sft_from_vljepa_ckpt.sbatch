@@ -3,7 +3,7 @@
 #SBATCH --partition=geo
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=96G
+#SBATCH --mem=150G
 #SBATCH --time=01:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/overfit_sft_vljepa_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/overfit_sft_vljepa_%j.err
@@ -24,7 +24,20 @@ CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 
 mkdir -p "$ROOT/logs"
 
-nvidia-smi dmon -s pucvmet -d 30 > "$ROOT/logs/gpu_monitor_${SLURM_JOB_ID}.log" 2>&1 &
+MONITOR_LOG="$ROOT/logs/gpu_monitor_${SLURM_JOB_ID}.log"
+
+nvidia-smi dmon -s pucvmet -d 30 > "$MONITOR_LOG" 2>&1 &
+
+# Host RAM alongside GPU stats in the same log — this is exactly the sanity
+# check for the DataLoader-worker-OOM seen on the previous run.
+( while true; do
+    printf '[MEM %s] used=%s / total=%s\n' \
+        "$(date +%T)" \
+        "$(free -h | awk '/Mem:/{print $3}')" \
+        "$(free -h | awk '/Mem:/{print $2}')" \
+        >> "$MONITOR_LOG"
+    sleep 30
+done ) &
 
 srun singularity exec \
     --nv \

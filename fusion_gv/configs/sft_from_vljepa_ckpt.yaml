@@ -87,10 +87,13 @@ data:
   # Must match --num-frames used by dataset/convert_spar_sftqa_uni8.sbatch —
   # GVJEPADataset drops any row shorter than this and truncates longer ones.
   num_frames: 8
-  num_workers: 16
+  # 16 workers x 2 ranks x prefetch_factor=4, at ~4.9GB/batch (128 samples x
+  # 8 frames x 518^2 vggt + 384^2 jepa, fp32) buffered up to ~600GB host RAM
+  # against a 96G job -> OOM-killed the worker. Cut both knobs.
+  num_workers: 4
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 4
+  prefetch_factor: 2
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
