@@ -107,10 +107,11 @@ train:
   batch_size:                   128
   gradient_accumulation_steps:  1
   # Single GPU: global batch = batch_size(128) * 1 = 128 -> ~13838 steps/epoch
-  # over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows). Halved from the
-  # previous 3-GPU run's 13839 steps (which was ~3 epochs at global batch 384)
-  # -> ~6920 steps at global batch 128 is ~0.5 epoch, not half the data coverage.
-  max_steps: 6920
+  # over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows). The 3-GPU plan was
+  # 3 epochs (13839 steps @ global batch 384); halving DATA COVERAGE (not raw
+  # step count) to 1.5 epochs at this global batch of 128:
+  #   ceil(1.5 * 1,771,283 / 128) = 20,758
+  max_steps: 20758
 
   clip_grad_norm: 1.0
   log_every:  50
