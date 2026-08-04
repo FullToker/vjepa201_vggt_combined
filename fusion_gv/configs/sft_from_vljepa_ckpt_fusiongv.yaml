@@ -1,0 +1,187 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FusionGVJEPA  ·  SFT stage  ·  warm-started from an open-vljepa checkpoint
+# ·  fusion_gv encoder (VGGT + V-JEPA concat, 2048-d)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Sibling of sft_from_vljepa_ckpt.yaml (x_encoder_type=vjepa, 1024-d) — same
+# init_vljepa_ckpt warm-start, same InfoNCE-only training, same merged
+# train+vsi_inference+mmsi_inference layout, but x_encoder_type=fusion_gv here
+# (VGGT geometric + V-JEPA semantic, SingleLevelFusion concat -> 2048-d).
+#
+# IMPORTANT shape mismatch: open-vljepa's checkpoint only ever saw a single
+# 1024-d V-JEPA2 encoder, so its predictor.vis_proj is Linear(1024, 2048).
+# Here vis_proj is Linear(2048, 2048) (D_fused=2048) -- shapes don't match, so
+# fusion_gv/load_vljepa_init.py's _load_matching() skips vis_proj entirely
+# (printed as "skipped src key" + "left at random init") and only transfers
+# predictor.layers/norm/pred_proj + y_encoder/y_proj, same as the vjepa-only
+# config. vis_proj starts random here, unlike the vjepa-only run where it
+# transfers cleanly.
+#
+# Get a checkpoint:
+#   bash dataset/download_open_vljepa_ckpt.sh   (or sbatch dataset/download_open_vljepa_ckpt.sbatch)
+#
+# Get the training data (spar_sftqa_sftvljepa_uni8.jsonl below):
+#   sbatch dataset/convert_spar_sftqa_uni8.sbatch
+#
+# Run:
+#   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/sft_from_vljepa_ckpt_fusiongv.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Path to the open-vljepa checkpoint used to warm-start predictor + y_encoder.
+# Same file as sft_from_vljepa_ckpt.yaml's -- reused, not redownloaded.
+init_vljepa_ckpt: ./ckpts/open_vljepa/best.pt
+
+
+# ── Frozen visual encoders + concat fusion ────────────────────────────────────
+fusion:
+  x_encoder_type: fusion_gv
+  x_encoder_output_dim: null
+
+  vggt_ckpt: ./ckpts/vggt.pt
+  jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
+
+  vggt_img_size:       518
+  vggt_patch_size:     14        # 518 / 14 = 37 -> 37x37 = 1369 patches
+  vggt_embed_dim:      1024
+  vggt_out_dim:        2048      # frame_inter || global_inter = 2 x embed_dim
+  vggt_num_patches:    1369
+  jepa_img_size:       384
+  jepa_patch_size:     16        # 384 / 16 = 24 -> 24x24 = 576 patches
+  jepa_embed_dim:      1024
+  jepa_num_patches:    576
+
+  # Fusion: per-stream LN+MLP(GELU) projector -> bilinear spatial-align -> channel concat
+  proj_dim: 1024                 # each stream projected to this dim -> fused = 2*proj_dim = 2048
+
+
+# ── Predictor + projection heads ──────────────────────────────────────────────
+model:
+  predictor_hidden_size: 1024    # toy path only, ignored (llama forces h=2048)
+  predictor_layers:      8
+  predictor_heads:       16
+  predictor_ffn_mult:    4
+  predictor_dropout:     0.1
+
+  # Must match open-vljepa's predictor backbone for the loaded layers to be
+  # meaningful — same checkpoint name, same n_keep_layers.
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens:  256
+
+  # Must match open-vljepa's y_encoder for the loaded weights to be meaningful.
+  y_encoder_name:    google/embeddinggemma-300m
+  max_target_tokens: 256
+
+  # Must equal open-vljepa's proj_dim (1536) — pred_proj/y_proj shapes depend on it.
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+
+  hf_cache_dir: ./ckpts
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+# InfoNCE (spar) only — no grounding, same as sft_from_vljepa_ckpt.yaml: no
+# `grounding:` section and no data.grounding_manifests below, so
+# build_grounding_loader_from_config() returns None and GVJEPATrainer.fit()
+# never enters its grounding branch. grounding_head stays uninstantiated.
+data:
+  train_manifests:
+    - ./data/spar_sftqa_sftvljepa_uni8.jsonl
+  # Must match --num-frames used by dataset/convert_spar_sftqa_uni8.sbatch —
+  # GVJEPADataset drops any row shorter than this and truncates longer ones.
+  num_frames: 8
+  # Conservative like sft_from_vljepa_ckpt.yaml's fixed values — fusion_gv
+  # loads both VGGT (1B) and JEPA per sample, more host-RAM-hungry per
+  # worker than the vjepa-only run that OOM'd at higher settings. Raise only
+  # after confirming headroom on this box.
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+train:
+  seed:    42
+  device:  cuda
+  precision: bf16
+
+  output_dir: ./outputs/sft_from_vljepa_ckpt_fusiongv
+
+  # fusion_gv is heavier per-sample than vjepa-only (VGGT + JEPA both loaded) —
+  # 3 GPUs (see trainbatch/sft_from_vljepa_ckpt_fusiongv.sbatch), smaller
+  # per-step batch_size with grad accumulation.
+  batch_size:                   32
+  gradient_accumulation_steps:  4
+  # effective batch = batch_size(32) * accum(4) * 3 GPUs = 384.
+  # 3 epochs over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows):
+  #   ceil(3 * 1,771,283 / 384) = 13,839
+  max_steps: 13839
+
+  clip_grad_norm: 1.0
+  log_every:  50
+  save_every: 0
+
+  # Lower LR than from-scratch sft_vv_concat.yaml's 5e-5 — predictor/y_encoder
+  # are already fine-tuned (vis_proj is the exception here, see note above,
+  # but one random-init Linear doesn't warrant a higher global LR).
+  learning_rate: 1.0e-5
+  min_lr:        1.0e-6
+  weight_decay:  0.01
+  adam_beta1:    0.9
+  adam_beta2:    0.95
+  adam_eps:      1.0e-8
+
+  scheduler:   cosine
+  temperature: 0.07
+
+
+# ── Inference: VSI-Bench ──────────────────────────────────────────────────────
+# Read by: python fusion_gv/infer_vsibench.py --config <this file> --config-section vsi_inference
+vsi_inference:
+  manifest: ./data/vsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt_fusiongv/vsibench
+
+  # null -> resolved from train.output_dir above (latest step_*.pt, or final.pt
+  # if save_every=0 left only that — see infer_gvjepa._latest_checkpoint).
+  checkpoint: null
+
+  mode: auto
+  # No grounding_head on this arch (no `grounding:` section above) -- must be
+  # false or infer_vsibench.py raises.
+  save_grounding: false
+
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── Inference: MMSI-Bench ─────────────────────────────────────────────────────
+# Read by: python fusion_gv/infer_mmsibench.py --config <this file> --config-section mmsi_inference
+mmsi_inference:
+  manifest: ./data/mmsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt_fusiongv/mmsibench
+
+  checkpoint: null   # same resolution as vsi_inference.checkpoint above
+
+  mode: auto
+  save_grounding: false   # see vsi_inference note above -- no grounding_head on this arch
+
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
+mlflow:
+  enabled: true
+  env_file: .env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: null
+  log_params: true
+  tags:
+    project: vljepa-fusion-gv
+    variant: warm-start-open-vljepa-fusiongv
