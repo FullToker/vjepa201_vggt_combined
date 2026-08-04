@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=overfit_sft_vljepa_fusiongv
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=150G
-#SBATCH --time=02:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_fusiongv/overfit_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_fusiongv/overfit_%j.err
 
@@ -13,10 +13,10 @@
 # SEPARATE fusion_gv/configs/overfit_from_vljepa_ckpt_fusiongv.yaml (own
 # output_dir, own infer output_dirs -- never touches the real run's paths,
 # see that yaml's header).
+#   - single GPU (the real run uses 3, see sft_from_vljepa_ckpt_fusiongv.sbatch --
+#     this is just a plumbing/OOM check, doesn't need to match GPU count)
 #   - freezes one batch (32 samples, matches train.batch_size in that yaml so
-#     per-GPU tensor shapes/memory match the real run -- _build_overfit_loader
-#     hands every rank the same full fixed batch, unsharded, so this is a
-#     per-GPU number, not multiplied by the 3 GPUs) and repeats it
+#     per-GPU tensor shapes/memory match the real run) and repeats it
 #   - 200 steps is enough to see loss drop AND to know within ~minutes
 #     whether batch_size=32 (fusion_gv: VGGT+JEPA both loaded per sample) OOMs
 #   - the infer steps then confirm the whole train->checkpoint->infer chain
@@ -68,7 +68,7 @@ SIF="srun singularity exec \
     $CONTAINER"
 
 echo "[overfit-train] start $(date)"
-$SIF accelerate launch --multi_gpu --num_processes 3 \
+$SIF accelerate launch --num_processes 1 \
     fusion_gv/train_gvjepa.py \
     --config "$CONFIG" \
     --overfit \
@@ -76,8 +76,6 @@ $SIF accelerate launch --multi_gpu --num_processes 3 \
     --overfit-steps 200
 echo "[overfit-train] done $(date)"
 
-# Infer steps are single-GPU (infer_vsibench.py/infer_mmsibench.py don't use
-# accelerate) -- fine to run on 1 of the 3 allocated GPUs after training ends.
 echo "[overfit-infer-vsibench] start $(date)"
 $SIF python3 fusion_gv/infer_vsibench.py \
     --config "$CONFIG" \
