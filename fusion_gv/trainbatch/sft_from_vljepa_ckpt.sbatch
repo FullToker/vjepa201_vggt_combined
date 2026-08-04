@@ -26,8 +26,15 @@
 #   sbatch dataset/convert_spar_sftqa_uni8.sbatch       # -> data/spar_sftqa_sftvljepa_uni8.jsonl
 #   dataset/make_vsibench_manifest.py / make_mmsibench_manifest.py already run # -> data/{vsibench,mmsibench}_manifest.jsonl
 #   sbatch fusion_gv/trainbatch/overfit_sft_from_vljepa_ckpt.sbatch   # OOM/correctness check first
+#
+# To re-run only the infer steps after training already finished (e.g. eval
+# on an updated benchmark manifest, or after fixing an infer_vsibench.py/
+# infer_mmsibench.py bug), skip training:
+#   RUN_TRAIN=0 sbatch fusion_gv/trainbatch/sft_from_vljepa_ckpt.sbatch
+# Requires train.output_dir's final.pt (or step_*.pt) to already exist.
 
 set -euo pipefail
+RUN_TRAIN=${RUN_TRAIN:-1}
 
 ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
@@ -59,11 +66,15 @@ SIF="srun singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER"
 
-echo "[train] start $(date)"
-$SIF accelerate launch --num_processes 1 \
-    fusion_gv/train_gvjepa.py \
-    --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
-echo "[train] done $(date)"
+if [ "$RUN_TRAIN" = "1" ]; then
+    echo "[train] start $(date)"
+    $SIF accelerate launch --num_processes 1 \
+        fusion_gv/train_gvjepa.py \
+        --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
+    echo "[train] done $(date)"
+else
+    echo "[train] skipped (RUN_TRAIN=0), reusing existing checkpoint"
+fi
 
 echo "[infer-vsibench] start $(date)"
 $SIF python3 fusion_gv/infer_vsibench.py \

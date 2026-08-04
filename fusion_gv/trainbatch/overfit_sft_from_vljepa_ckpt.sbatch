@@ -28,8 +28,17 @@
 # Slurm before this script body runs, so mkdir -p inside the script is too
 # late for those two -- create the folder once before first submission:
 #   mkdir -p /glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt
+#
+# To re-run only the infer steps against an existing overfit checkpoint
+# (e.g. iterating on an infer_vsibench.py/infer_mmsibench.py bug without
+# redoing the 200-step train each time), skip training:
+#   RUN_TRAIN=0 sbatch fusion_gv/trainbatch/overfit_sft_from_vljepa_ckpt.sbatch
+# Requires ./outputs/sft_from_vljepa_ckpt_overfit/final.pt to already exist
+# (train.output_dir in overfit_from_vljepa_ckpt.yaml) -- from a prior run
+# with RUN_TRAIN unset/1.
 
 set -euo pipefail
+RUN_TRAIN=${RUN_TRAIN:-1}
 
 ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
@@ -62,14 +71,18 @@ SIF="srun singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER"
 
-echo "[overfit-train] start $(date)"
-$SIF accelerate launch --num_processes 1 \
-    fusion_gv/train_gvjepa.py \
-    --config "$CONFIG" \
-    --overfit \
-    --overfit-samples 128 \
-    --overfit-steps 200
-echo "[overfit-train] done $(date)"
+if [ "$RUN_TRAIN" = "1" ]; then
+    echo "[overfit-train] start $(date)"
+    $SIF accelerate launch --num_processes 1 \
+        fusion_gv/train_gvjepa.py \
+        --config "$CONFIG" \
+        --overfit \
+        --overfit-samples 128 \
+        --overfit-steps 200
+    echo "[overfit-train] done $(date)"
+else
+    echo "[overfit-train] skipped (RUN_TRAIN=0), reusing existing checkpoint"
+fi
 
 echo "[overfit-infer-vsibench] start $(date)"
 $SIF python3 fusion_gv/infer_vsibench.py \
