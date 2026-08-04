@@ -332,16 +332,25 @@ class FusionGVJEPA(nn.Module):
 
     def _pool_visual(
         self,
-        images_vggt: torch.Tensor,
+        images_vggt: torch.Tensor | None,
         images_jepa: torch.Tensor,
+        batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the X-encoder and spatially mean-pool its final-level output.
+
+        Args:
+            images_vggt: may be None under x_encoder_type="vjepa" when the
+                caller skipped building it (e.g. infer_vsibench.py's
+                need_vggt optimization).
+            batch_size: B, needed to split images_jepa's flattened (B*S, ...)
+                shape back into (B, S) when images_vggt (which otherwise
+                carries both numbers) is None.
 
         Returns:
             pooled:  (B, S, D_f)       mean-pooled over patches
             spatial: (B, S, P, D_f)    raw patch features before pooling
         """
-        feat = self.x_encoder(images_vggt, images_jepa)   # (B, S, P, D_f)
+        feat = self.x_encoder(images_vggt, images_jepa, batch_size)   # (B, S, P, D_f)
         return feat.mean(dim=2), feat                      # (B,S,D_f), (B,S,P,D_f)
 
     def _tokenize(self, tokenizer, texts: list[str], max_length: int, device: torch.device):
@@ -370,21 +379,25 @@ class FusionGVJEPA(nn.Module):
 
     def _run_predictor(
         self,
-        images_vggt: torch.Tensor,
+        images_vggt: torch.Tensor | None,
         images_jepa: torch.Tensor,
         queries: list[str],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Shared predictor forward used by both InfoNCE and grounding paths.
+
+        Args:
+            images_vggt: may be None under x_encoder_type="vjepa" (see
+                _pool_visual) -- device/B are then taken from images_jepa/queries.
 
         Returns:
             x_vis:   (B, S, h)      predictor output over visual positions (summary)
             pooled:  (B, h)         query-pooled embedding (for pred_proj)
             spatial: (B, S, P, D_f) raw spatial features before pooling
         """
-        device = images_vggt.device
-        B = images_vggt.shape[0]
+        device = images_vggt.device if images_vggt is not None else images_jepa.device
+        B = len(queries)
 
-        pooled_vis, spatial = self._pool_visual(images_vggt, images_jepa)
+        pooled_vis, spatial = self._pool_visual(images_vggt, images_jepa, B)
         vis = self.vis_proj(pooled_vis)   # (B, S, h)
         S = vis.shape[1]
         assert S <= _S_MAX, f"frame_embed only covers {_S_MAX} frames, got S={S}"

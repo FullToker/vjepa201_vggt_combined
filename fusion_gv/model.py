@@ -55,13 +55,26 @@ class VJEPAOnlyXEncoder(nn.Module):
         self,
         images_vggt: torch.Tensor | None,
         images_jepa: torch.Tensor,
+        batch_size: int | None = None,
     ) -> torch.Tensor:
-        """Return final-level V-JEPA features: (B, S, 576, 1024)."""
+        """Return final-level V-JEPA features: (B, S, 576, 1024).
+
+        Args:
+            batch_size: required when images_vggt is None (its (B, S, ...)
+                shape is what normally carries B) -- images_jepa alone is
+                flattened (B*S, ...), ambiguous without B given separately.
+        """
         if images_vggt is not None:
             B, S = images_vggt.shape[:2]
         else:
-            B = 1
-            S = images_jepa.shape[0]
+            if batch_size is None:
+                raise ValueError(
+                    "batch_size is required when images_vggt is None -- "
+                    "images_jepa's flattened (B*S, ...) shape can't be split "
+                    "into (B, S) without it."
+                )
+            B = batch_size
+            S = images_jepa.shape[0] // B
         return self.jepa_encoder(images_jepa, B, S)[-1]
 
     def trainable_parameters(self):
@@ -114,16 +127,23 @@ class FusionGV(nn.Module):
         self,
         images_vggt: torch.Tensor,
         images_jepa: torch.Tensor,
+        batch_size: int | None = None,
     ) -> torch.Tensor:
         """
         Args:
             images_vggt : (B, S, 3, 518, 518)  float32 [0, 1]
             images_jepa : (B*S, 3, 1, 384, 384) float32, ImageNet-normalised
+            batch_size  : unused here (images_vggt always carries B, S) --
+                accepted only so callers can treat FusionGV and
+                VJEPAOnlyXEncoder interchangeably (the latter needs it when
+                images_vggt is None).
 
         Returns:
             (B, S, 1369, D_fused)   D_fused = 2 * config.proj_dim (default 2048)
         """
         B, S = images_vggt.shape[:2]
+        if batch_size is not None and batch_size != B:
+            raise ValueError(f"batch_size={batch_size} doesn't match images_vggt's B={B}")
 
         vggt_feats = self.vggt_encoder(images_vggt)          # 4 × (B, S, 1369, 2048)
         jepa_feats = self.jepa_encoder(images_jepa, B, S)    # 4 × (B, S,  576, 1024)
