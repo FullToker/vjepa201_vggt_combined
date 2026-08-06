@@ -308,6 +308,7 @@ class GVJEPATrainer:
         grounding_loss_weight: float = 0.1,
         focal_alpha: float = 2.0,
         focal_beta: float = 4.0,
+        grounding_ema_decay: float = 0.98,
         mlflow_logger=None,
         accelerator=None,
     ) -> None:
@@ -334,6 +335,13 @@ class GVJEPATrainer:
         self.grounding_loss_weight = grounding_loss_weight
         self.focal_alpha           = focal_alpha
         self.focal_beta            = focal_beta
+        self.grounding_ema_decay   = grounding_ema_decay
+        # EMA of raw grounding_loss, self-normalizes it before applying
+        # grounding_loss_weight (see _grounding_step). None until the first
+        # real (non-placeholder) grounding loss is observed -- initialized to
+        # that first value directly rather than decayed in from 0, so the
+        # early steps aren't biased toward an artificial near-zero EMA.
+        self._grounding_ema: float | None = None
         if self.accelerator.is_main_process:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -362,8 +370,15 @@ class GVJEPATrainer:
             json.dump(meta, f, indent=2)
         return path
 
-    def _grounding_step(self, batch: dict) -> tuple[torch.Tensor, float]:
-        """Forward + grounding modified-focal-loss only. Returns (loss, grounding_loss_val)."""
+    def _grounding_step(self, batch: dict) -> tuple[torch.Tensor, float, float]:
+        """Forward + grounding modified-focal-loss only.
+
+        Returns (loss, raw_grounding_loss_val, ema_normalized_grounding_loss_val).
+        `loss` (what actually gets backpropped) uses the EMA-normalized value;
+        the raw value is returned separately purely for logging/diagnostics —
+        it's what you want to watch to see if grounding is actually improving,
+        since the normalized value is deliberately flattened to ~1.0 by design.
+        """
         device = self.accelerator.device
         images_vggt = batch["images_vggt"].to(device, non_blocking=True)
         images_jepa = batch["images_jepa"].to(device, non_blocking=True)
@@ -371,6 +386,7 @@ class GVJEPATrainer:
         raw_model = self.accelerator.unwrap_model(self.model)
         with self.accelerator.autocast():
             grounding_loss = torch.tensor(0.0, device=device)
+            normalized_grounding_loss = grounding_loss
             boxes_batch = batch.get("boxes")
             if (
                 raw_model.grounding_head is not None
@@ -396,9 +412,25 @@ class GVJEPATrainer:
                     logits, gt_flat, alpha=self.focal_alpha, beta=self.focal_beta
                 )
 
-            loss = self.grounding_loss_weight * grounding_loss / self.grad_accum_steps
+                # EMA-normalize so grounding_loss_weight means roughly the same
+                # thing throughout training, instead of tracking whatever raw
+                # scale the focal loss happens to be at (large early, shrinks
+                # as the model converges). ema is a detached python float, not
+                # a tensor, so it never enters the autograd graph -- see the
+                # note in the earlier conversation on why that matters.
+                raw_val = grounding_loss.item()
+                if self._grounding_ema is None:
+                    self._grounding_ema = raw_val
+                else:
+                    self._grounding_ema = (
+                        self.grounding_ema_decay * self._grounding_ema
+                        + (1 - self.grounding_ema_decay) * raw_val
+                    )
+                normalized_grounding_loss = grounding_loss / (self._grounding_ema + 1e-8)
 
-        return loss, grounding_loss.item()
+            loss = self.grounding_loss_weight * normalized_grounding_loss / self.grad_accum_steps
+
+        return loss, grounding_loss.item(), normalized_grounding_loss.item()
 
     def _spar_step(self, batch: dict) -> tuple[torch.Tensor, float]:
         """Forward + InfoNCE only. Returns (loss, infonce_loss_val)."""
@@ -437,6 +469,7 @@ class GVJEPATrainer:
         running_loss = 0.0
         running_infonce = 0.0
         running_grounding = 0.0
+        running_grounding_ema = 0.0
         pbar = tqdm(total=self.max_steps, desc="gvjepa-train", disable=not is_main)
 
         while step < self.max_steps:
@@ -447,17 +480,19 @@ class GVJEPATrainer:
 
             if use_grounding:
                 batch = next(grounding_iter)
-                loss, grounding_val = self._grounding_step(batch)
+                loss, grounding_val, grounding_ema_val = self._grounding_step(batch)
                 infonce_val = 0.0
             else:
                 batch = next(spar_iter)
                 loss, infonce_val = self._spar_step(batch)
                 grounding_val = 0.0
+                grounding_ema_val = 0.0
 
             self.accelerator.backward(loss)
-            running_loss      += loss.item() * self.grad_accum_steps
-            running_infonce   += infonce_val
-            running_grounding += grounding_val
+            running_loss           += loss.item() * self.grad_accum_steps
+            running_infonce        += infonce_val
+            running_grounding      += grounding_val
+            running_grounding_ema  += grounding_ema_val
 
             # --- debug: mem leak investigation (itertools.cycle GPU-batch retention bug) ---
             # if step % 7 == 0 or step % 15 == 0:
@@ -508,7 +543,16 @@ class GVJEPATrainer:
                     "step": step,
                     "loss": running_loss / self.log_every,
                     "infonce_loss": running_infonce / self.log_every,
+                    # Raw grounding focal loss -- watch this to see whether
+                    # grounding is actually improving. Averaged over log_every
+                    # steps total, not just the ~1-in-grounding_ratio steps
+                    # that were actually grounding, same as before.
                     "grounding_loss": running_grounding / self.log_every,
+                    # EMA-normalized version -- this is what grounding_loss_weight
+                    # actually multiplies (see _grounding_step). Stays ~O(1) by
+                    # design, not a quality signal -- only meaningful for
+                    # sanity-checking that the normalization itself is working.
+                    "grounding_loss_ema_normalized": running_grounding_ema / self.log_every,
                     "lr": self.optimizer.param_groups[0]["lr"],
                 }
                 if is_main:
@@ -520,11 +564,12 @@ class GVJEPATrainer:
                                 "train/loss":           entry["loss"],
                                 "train/infonce_loss":   entry["infonce_loss"],
                                 "train/grounding_loss": entry["grounding_loss"],
+                                "train/grounding_loss_ema_normalized": entry["grounding_loss_ema_normalized"],
                                 "train/lr":             entry["lr"],
                             },
                             step=step,
                         )
-                running_loss = running_infonce = running_grounding = 0.0
+                running_loss = running_infonce = running_grounding = running_grounding_ema = 0.0
 
             if is_main and self.save_every and self.save_every > 0 and step % self.save_every == 0:
                 self._save_ckpt(step)

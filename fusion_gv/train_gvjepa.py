@@ -171,6 +171,7 @@ def main() -> None:
             grounding_loss_weight=gcfg.get("loss_weight", 0.1),
             focal_alpha=gcfg.get("focal_alpha", 2.0),
             focal_beta=gcfg.get("focal_beta", 4.0),
+            grounding_ema_decay=gcfg.get("ema_decay", 0.98),
             mlflow_logger=mlflow_logger,
             accelerator=accelerator,
         )

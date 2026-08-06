@@ -55,13 +55,21 @@ grounding:
   ffn_mult:    4
   dropout:     0.0
   patch_grid:  37        # 518 / 14 = 37
-  loss_weight: 0.1        # grounding focal-loss contribution to total loss
-                           # NOTE: scale changed vs the old BCE — CenterNet-style
-                           # focal loss starts much larger (per-batch normalized
-                           # by positive-point count, not per-pixel mean); re-sweep
-                           # this before trusting 0.1 carries over.
+  loss_weight: 0.1        # grounding focal-loss contribution to total loss.
+                           # Applied AFTER ema_decay normalization below (see
+                           # gvjepa_trainer._grounding_step) -- the raw focal
+                           # loss is divided by a running EMA of itself first,
+                           # so this weight means roughly the same thing
+                           # throughout training instead of tracking whatever
+                           # scale the raw loss happens to be at (large early,
+                           # shrinks as the model converges). Still worth
+                           # re-sweeping, just less scale-sensitive than before.
   focal_alpha: 2.0         # CenterNet modified focal loss (Zhou et al. 2019)
   focal_beta:  4.0         # higher = softer penalty near box center
+  ema_decay:   0.98        # EMA window over grounding observations (not global
+                           # steps) ≈ 1/(1-decay) ≈ 50 grounding steps ≈ 250
+                           # global steps at batch_ratio=5. Higher = smoother
+                           # but slower to track real scale shifts.
   batch_ratio: 5           # 1 grounding batch per 5 SPAR batches
 
 
