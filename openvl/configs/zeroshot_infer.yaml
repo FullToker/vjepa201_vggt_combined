@@ -1,0 +1,45 @@
+# Zero-shot (no SFT) open-vljepa baseline eval on VSI-Bench / MMSI-Bench.
+# ──────────────────────────────────────────────────────────────────────────────
+# Loads open-vljepa's own pretrained checkpoint + model classes directly (not
+# fusion_gv/FusionGVJEPA) -- see openvl/infer_bench.py. Purpose: measure how
+# much (if any) the fusion_gv SFT runs actually improved over the raw
+# open-vljepa checkpoint, on the exact same benchmarks. V-JEPA2 already
+# accepts a variable number of frames natively -- no architecture changes
+# needed to feed it multi-image manifests.
+#
+# Get a checkpoint (same file used for fusion_gv's init_vljepa_ckpt warm-start):
+#   bash dataset/download_open_vljepa_ckpt.sh
+#
+# Run:
+#   python openvl/infer_bench.py --config openvl/configs/zeroshot_infer.yaml --config-section vsi_inference
+#   python openvl/infer_bench.py --config openvl/configs/zeroshot_infer.yaml --config-section mmsi_inference
+# ──────────────────────────────────────────────────────────────────────────────
+
+checkpoint: ./ckpts/open_vljepa/best.pt
+
+# Data-side params only -- model architecture (encoder/predictor/y_encoder
+# dims) comes from inside the checkpoint itself (ckpt["config"], see
+# scripts/eval.py in ../open-vljepa), not duplicated here.
+image_size:    256   # facebook/vjepa2-vitl-fpc64-256's native input size
+max_query_len: 64
+max_target_len: 64
+
+
+# ── VSI-Bench ──────────────────────────────────────────────────────────────────
+vsi_inference:
+  manifest: ./data/vsibench_manifest.jsonl
+  output_dir: ./outputs/inference/openvl_zeroshot/vsibench
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── MMSI-Bench ─────────────────────────────────────────────────────────────────
+mmsi_inference:
+  manifest: ./data/mmsibench_manifest.jsonl
+  output_dir: ./outputs/inference/openvl_zeroshot/mmsibench
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
