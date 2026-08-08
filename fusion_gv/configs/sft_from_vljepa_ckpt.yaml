@@ -106,16 +106,20 @@ train:
 
   batch_size:                   128
   gradient_accumulation_steps:  1
-  # Single GPU: global batch = batch_size(128) * 1 = 128 -> ~13838 steps/epoch
-  # over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows). The 3-GPU plan was
-  # 3 epochs (13839 steps @ global batch 384); halving DATA COVERAGE (not raw
-  # step count) to 1.5 epochs at this global batch of 128:
-  #   ceil(1.5 * 1,771,283 / 128) = 20,758
-  max_steps: 20758
+  # 3 GPUs (see trainbatch/sft_from_vljepa_ckpt.sbatch): global batch =
+  # batch_size(128) * 1 * 3 GPUs = 384. Recomputed for 1.5 epochs (same
+  # data-coverage target as before) at this global batch:
+  #   ceil(1.5 * 1,771,283 / 384) = 6,920
+  # (the previous max_steps=20758 was sized for global batch=128/1 GPU --
+  # left unchanged it would have covered 4.5 epochs instead of 1.5)
+  max_steps: 6920
 
   clip_grad_norm: 1.0
   log_every:  50
-  save_every: 0
+  # Was 0 (final.pt only) -- a prior run OOM'd at step 10919/20758 with
+  # nothing to resume from, losing ~4 days. Checkpoint periodically so a
+  # future failure doesn't cost the whole run.
+  save_every: 2000
 
   # Lower LR than sft_vjepa.yaml's from-scratch 5e-5 — predictor/y_encoder
   # are already fine-tuned, this stage is adapting, not learning from zero.

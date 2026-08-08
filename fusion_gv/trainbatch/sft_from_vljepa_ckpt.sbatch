@@ -1,18 +1,26 @@
 #!/bin/bash
 #SBATCH --job-name=sft_from_vljepa_ckpt
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:3
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=150G
+#SBATCH --mem=200G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt/%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt/%j.err
 
-# Single-GPU, single job: train, then VSI-Bench infer, then MMSI-Bench infer,
+# 3 GPUs, single job: train, then VSI-Bench infer, then MMSI-Bench infer,
 # all against fusion_gv/configs/sft_from_vljepa_ckpt.yaml (train + vsi_inference
-# + mmsi_inference sections all live in that one file). Infer steps read the
-# checkpoint train just wrote via train.output_dir -> final.pt (save_every=0,
-# see infer_gvjepa._latest_checkpoint), no path to fill in between steps.
+# + mmsi_inference sections all live in that one file, including max_steps
+# recomputed for the 3x larger global batch -- see that yaml's train: section).
+# Infer steps read the checkpoint train just wrote via train.output_dir ->
+# final.pt or the latest step_*.pt (see infer_gvjepa._latest_checkpoint), no
+# path to fill in between steps.
+#
+# --mem=200G (was 150G): a prior 1-GPU run OOM'd on host RAM at MaxRSS=155GB
+# after ~3d20h (sacct -j <jobid> confirmed State=FAILED, MaxRSS > --mem). This
+# bumps the ceiling but doesn't fix the underlying slow leak -- if it OOMs
+# again at a higher MaxRSS, the leak needs actual profiling, not just more
+# --mem headroom.
 #
 # All logs for this experiment (Slurm stdout/stderr above, gpu/mem monitor
 # below) live under logs/sft_from_vljepa_ckpt/ instead of flat in logs/.
@@ -68,7 +76,7 @@ SIF="srun singularity exec \
 
 if [ "$RUN_TRAIN" = "1" ]; then
     echo "[train] start $(date)"
-    $SIF accelerate launch --num_processes 1 \
+    $SIF accelerate launch --multi_gpu --num_processes 3 \
         fusion_gv/train_gvjepa.py \
         --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
     echo "[train] done $(date)"
