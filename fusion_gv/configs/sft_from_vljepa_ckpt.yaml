@@ -87,10 +87,12 @@ data:
   # Must match --num-frames used by dataset/convert_spar_sftqa_uni8.sbatch —
   # GVJEPADataset drops any row shorter than this and truncates longer ones.
   num_frames: 8
-  # 16 workers x 2 ranks x prefetch_factor=4, at ~4.9GB/batch (128 samples x
-  # 8 frames x 518^2 vggt + 384^2 jepa, fp32) buffered up to ~600GB host RAM
-  # against a 96G job -> OOM-killed the worker. Cut both knobs.
-  num_workers: 4
+  # Each of the 3 ranks (accelerate --multi_gpu) spawns its OWN independent
+  # DataLoader workers -- total host worker processes = num_workers * 3, not
+  # num_workers. A 1-GPU run OOM'd at num_workers=4 (150G, later 200G still
+  # OOM'd once bumped to 3 GPUs without lowering this) -- halved to keep the
+  # 3-rank total (6) below the 1-rank run's total (4) instead of 3x-ing it.
+  num_workers: 2
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2
