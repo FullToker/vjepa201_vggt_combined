@@ -236,9 +236,14 @@ def run_eval(
             with torch.autocast(device_type=device.type, dtype=dtype, enabled=autocast_enabled):
                 pred = model(pixel_values, query_ids, query_mask)  # target_ids=None -> returns pred (B, D)
 
-            pred_idx = score_candidates(
-                model, target_tokenizer, pred, batch["candidates"], max_target_len, device
-            )
+                # y_encoder.projector is a plain fp32 nn.Linear (torch_dtype
+                # only covers y_encoder.model at construction, see
+                # openvljepa/models/y_encoder.py) -- outside autocast this
+                # dtype-mismatches against the bf16 pooled output it receives.
+                # Must stay inside the same autocast block as the encoder call.
+                pred_idx = score_candidates(
+                    model, target_tokenizer, pred, batch["candidates"], max_target_len, device
+                )
 
             B = pixel_values.shape[0]
             for i in range(B):
