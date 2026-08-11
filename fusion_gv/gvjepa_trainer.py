@@ -299,6 +299,9 @@ class GVJEPATrainer:
         max_steps: int,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         grounding_loader: Optional[DataLoader] = None,
+        val_loader: Optional[DataLoader] = None,
+        val_every: int = 500,
+        val_max_batches: int = 20,
         grounding_ratio: int = 5,
         grad_accum_steps: int = 1,
         clip_grad_norm: float = 1.0,
@@ -323,6 +326,12 @@ class GVJEPATrainer:
         self.scheduler = scheduler
         self.train_loader = train_loader
         self.grounding_loader = grounding_loader
+        # Held-out loss monitoring only -- never trains on this, never picks a
+        # "best" checkpoint from it, never early-stops. Just makes val_loss
+        # visible in train_log.jsonl/mlflow alongside train loss. See _run_val.
+        self.val_loader = val_loader
+        self.val_every = val_every
+        self.val_max_batches = val_max_batches
         self.grounding_ratio = grounding_ratio
         self.output_dir = Path(output_dir)
         self.max_steps = max_steps
@@ -444,6 +453,34 @@ class GVJEPATrainer:
             loss = loss / self.grad_accum_steps
 
         return loss, loss.item() * self.grad_accum_steps
+
+    @torch.no_grad()
+    def _run_val(self) -> float:
+        """Held-out InfoNCE loss, read-only -- no backward, no optimizer.step,
+        weights never change. Capped at val_max_batches (default 20) so this
+        stays a quick check, not a full pass.
+
+        Main-process only: a no_grad forward triggers no DDP collective (only
+        backward's autograd hooks do), so the other ranks aren't desynced by
+        rank 0 doing extra work here -- they just idle until rank 0 reaches
+        its next real backward(), same as any other main-process-only bit in
+        this trainer (e.g. _save_ckpt).
+        """
+        device = self.accelerator.device
+        raw_model = self.accelerator.unwrap_model(self.model)
+        raw_model.eval()
+        losses = []
+        for i, batch in enumerate(self.val_loader):
+            if i >= self.val_max_batches:
+                break
+            images_vggt = batch["images_vggt"].to(device, non_blocking=True)
+            images_jepa = batch["images_jepa"].to(device, non_blocking=True)
+            with self.accelerator.autocast():
+                out = raw_model(images_vggt, images_jepa, batch["query"], batch["target"])
+                loss = bidirectional_infonce(out["pred"], out["target"], temperature=self.temperature)
+            losses.append(loss.item())
+        raw_model.train()
+        return sum(losses) / len(losses) if losses else float("nan")
 
     def fit(self) -> None:
         """Run training until max_steps is reached."""
@@ -570,6 +607,14 @@ class GVJEPATrainer:
                             step=step,
                         )
                 running_loss = running_infonce = running_grounding = running_grounding_ema = 0.0
+
+            if is_main and self.val_loader is not None and step % self.val_every == 0:
+                val_loss = self._run_val()
+                val_entry = {"step": step, "val_loss": val_loss}
+                with open(log_path, "a") as f:
+                    f.write(json.dumps(val_entry) + "\n")
+                if self.mlflow_logger is not None:
+                    self.mlflow_logger.log_metrics({"val/infonce_loss": val_loss}, step=step)
 
             if is_main and self.save_every and self.save_every > 0 and step % self.save_every == 0:
                 self._save_ckpt(step)
@@ -706,6 +751,44 @@ def build_grounding_loader_from_config(cfg: dict) -> Optional[DataLoader]:
     num_frames = dcfg.get("grounding_num_frames", dcfg.get("num_frames"))
     batch_size = cfg["train"].get("grounding_batch_size", cfg["train"]["batch_size"])
     return _build_loader(manifests, dcfg, batch_size, num_frames=num_frames)
+
+
+def build_val_loader_from_config(cfg: dict) -> Optional[DataLoader]:
+    """Build a held-out DataLoader for GVJEPATrainer.val_loader (periodic
+    in-training loss monitoring, see _run_val). Returns None if
+    data.val_manifests is unset -- fully optional, existing configs that
+    don't set it behave exactly as before.
+
+    Unlike _build_loader (used for train/grounding): shuffle=False,
+    drop_last=False (val is a fixed small check, not something you want to
+    silently drop the tail of), and no persistent_workers/prefetch_factor
+    tuning -- this loader is read a handful of batches at a time, not
+    streamed continuously like the train loader.
+    """
+    dcfg = cfg["data"]
+    manifests = dcfg.get("val_manifests")
+    if not manifests:
+        return None
+    from pathlib import Path
+    from torch.utils.data import ConcatDataset
+
+    datasets = []
+    for path in manifests:
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Val manifest not found: {path}")
+        datasets.append(GVJEPADataset(path, num_frames=dcfg.get("num_frames")))
+    ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+
+    batch_size = cfg["train"].get("val_batch_size", cfg["train"]["batch_size"])
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=dcfg.get("val_num_workers", 2),
+        pin_memory=dcfg.get("pin_memory", True),
+        collate_fn=gvjepa_collate,
+    )
 
 
 def build_optimizer_and_scheduler_from_config(

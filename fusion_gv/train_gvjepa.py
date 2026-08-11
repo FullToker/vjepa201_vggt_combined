@@ -26,6 +26,7 @@ from fusion_gv.gvjepa_trainer import (
     GVJEPATrainer,
     build_loader_from_config,
     build_grounding_loader_from_config,
+    build_val_loader_from_config,
     build_model_from_config,
     build_optimizer_and_scheduler_from_config,
 )
@@ -120,6 +121,9 @@ def main() -> None:
         load_predictor_and_y_encoder_from_vljepa(model, cfg["init_vljepa_ckpt"])
     loader           = build_loader_from_config(cfg)
     grounding_loader = build_grounding_loader_from_config(cfg)
+    # Not accelerator.prepare()'d -- val runs main-process-only (see
+    # GVJEPATrainer._run_val), so it doesn't need DDP wrap/DistributedSampler.
+    val_loader       = build_val_loader_from_config(cfg)
     optimizer, scheduler = build_optimizer_and_scheduler_from_config(model, cfg)
 
     # prepare: Accelerate handles device placement, DDP wrap, DistributedSampler
@@ -162,6 +166,9 @@ def main() -> None:
             max_steps=tcfg["max_steps"],
             scheduler=scheduler,
             grounding_loader=grounding_loader,
+            val_loader=val_loader,
+            val_every=tcfg.get("val_every", 500),
+            val_max_batches=tcfg.get("val_max_batches", 20),
             grounding_ratio=gcfg.get("batch_ratio", 5),
             grad_accum_steps=1 if args.overfit else tcfg.get("gradient_accumulation_steps", 1),
             clip_grad_norm=tcfg.get("clip_grad_norm", 1.0),
