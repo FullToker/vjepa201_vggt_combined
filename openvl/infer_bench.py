@@ -297,7 +297,7 @@ def run_eval(
             query_ids = batch["query_ids"].to(device, non_blocking=True)
             query_mask = batch["query_mask"].to(device, non_blocking=True)
 
-            with torch.autocast(device_type=device.type, dtype=dtype, enabled=autocast_enabled):
+            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=dtype, enabled=autocast_enabled):
                 pred = model(pixel_values, query_ids, query_mask)  # target_ids=None -> returns pred (B, D)
 
                 # y_encoder.projector is a plain fp32 nn.Linear (torch_dtype
