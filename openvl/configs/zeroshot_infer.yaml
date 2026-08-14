@@ -24,6 +24,14 @@ image_size:    256   # facebook/vjepa2-vitl-fpc64-256's native input size
 max_query_len: 64
 max_target_len: 64
 
+# embedding_metrics_lib.py metrics (held-out InfoNCE / alignment / uniformity /
+# AUC / per-sample margin) -- see openvl/infer_bench.py::encode_targets.
+# temperature only scales the reported InfoNCE loss, doesn't need to match
+# whatever open-vljepa was originally trained with. max_samples bounds the
+# O(n^2) pairwise similarity matrix on large manifests; null = use every row.
+embedding_metrics_temperature: 0.07
+embedding_metrics_max_samples: 2000
+
 
 # ── VSI-Bench ──────────────────────────────────────────────────────────────────
 vsi_inference:

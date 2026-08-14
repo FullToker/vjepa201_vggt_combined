@@ -8,6 +8,14 @@ warm-started+SFT'd fusion_gv runs (sft_from_vljepa_ckpt*.yaml). If SFT barely
 beats this, the gap is in the SFT setup (data/domain/training), not in
 whether warm-starting from open-vljepa is a good idea in principle.
 
+Besides the existing MC candidate accuracy, this also reports embedding-space
+metrics (held-out InfoNCE loss, alignment/uniformity, positive/negative AUC,
+per-sample margin) via evals/embedding_metrics_lib.py -- the same functions
+evals/embedding_metrics.py runs against FusionGVJEPA, so the raw open-vljepa
+baseline and the SFT'd fusion_gv checkpoints are scored on identical metrics
+and are directly comparable. Unlike MC accuracy (needs "candidates" in the
+manifest), these only need each row's plain "target" text.
+
 V-JEPA2 (open-vljepa's X-encoder) is a video model and already accepts a
 variable number of frames per sample natively (RoPE, no code changes needed)
 -- see openvljepa/models/encoder.py::VJEPA2Encoder. This script just feeds it
@@ -38,6 +46,12 @@ import yaml
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+
+# openvl/infer_bench.py -> openvl/ -> vjepa2/ (this repo's root)
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from evals.embedding_metrics_lib import compute_embedding_metrics
 
 # openvl/infer_bench.py -> openvl/ -> vjepa2/ -> Program/ -> Program/open-vljepa
 _DEFAULT_OPENVLJEPA_ROOT = Path(__file__).resolve().parents[2] / "open-vljepa"
@@ -192,6 +206,23 @@ def score_candidates(
     return results
 
 
+@torch.no_grad()
+def encode_targets(
+    model, target_tokenizer, texts: List[str], max_target_len: int, device: torch.device,
+) -> torch.Tensor:
+    """Encode each row's plain target text through openvljepa's own y_encoder.
+
+    Separate from score_candidates (which encodes the MC candidate pool) --
+    embedding_metrics needs one embedding per row's target, not per candidate,
+    and must work on manifests that have no "candidates" field at all.
+    """
+    tenc = target_tokenizer(
+        texts, max_length=max_target_len, padding="max_length", truncation=True,
+        return_tensors="pt",
+    )
+    return model.y_encoder(tenc["input_ids"].to(device), tenc["attention_mask"].to(device))
+
+
 def run_eval(
     model, query_tokenizer, target_tokenizer,
     cfg: dict, icfg: dict, device: torch.device, dtype,
@@ -204,6 +235,10 @@ def run_eval(
     image_size = int(cfg.get("image_size", 256))
     max_query_len = int(cfg.get("max_query_len", 64))
     max_target_len = int(cfg.get("max_target_len", 64))
+    # embedding_metrics_* are data-side params (like image_size above), not part
+    # of the checkpoint's own config -- see evals/embedding_metrics_lib.py.
+    embedding_metrics_temperature = float(cfg.get("embedding_metrics_temperature", 0.07))
+    embedding_metrics_max_samples = cfg.get("embedding_metrics_max_samples", 2000)
 
     dataset = BenchDataset(manifest_path)
     batches = _bucket_batches(dataset.num_images, batch_size)
@@ -227,6 +262,14 @@ def run_eval(
     per_type_correct: Dict[str, int] = {}
     autocast_enabled = dtype is not None and device.type == "cuda"
 
+    # Accumulated on CPU across the whole loop for embedding_metrics_lib's
+    # corpus-level metrics (held-out InfoNCE / alignment / uniformity / AUC /
+    # margin) -- capped at embedding_metrics_max_samples rows so the O(n^2)
+    # pairwise similarity matrix at the end stays bounded on large manifests.
+    metrics_pred_chunks: List[torch.Tensor] = []
+    metrics_target_chunks: List[torch.Tensor] = []
+    metrics_collected = 0
+
     with open(predictions_path, "w", encoding="utf-8") as out_f:
         for batch in tqdm(loader, desc=f"openvl-zeroshot[{output_dir.name}]"):
             pixel_values = batch["pixel_values"].to(device, non_blocking=True)
@@ -244,6 +287,12 @@ def run_eval(
                 pred_idx = score_candidates(
                     model, target_tokenizer, pred, batch["candidates"], max_target_len, device
                 )
+
+                if embedding_metrics_max_samples is None or metrics_collected < embedding_metrics_max_samples:
+                    target_emb = encode_targets(model, target_tokenizer, batch["target"], max_target_len, device)
+                    metrics_pred_chunks.append(pred.float().cpu())
+                    metrics_target_chunks.append(target_emb.float().cpu())
+                    metrics_collected += len(batch["target"])
 
             B = pixel_values.shape[0]
             for i in range(B):
@@ -285,12 +334,31 @@ def run_eval(
             for t in per_type_total
         },
     }
+
+    embedding_metrics = compute_embedding_metrics(
+        torch.cat(metrics_pred_chunks, dim=0),
+        torch.cat(metrics_target_chunks, dim=0),
+        embedding_metrics_temperature,
+    )
+    embedding_metrics["temperature"] = embedding_metrics_temperature
+    metrics["embedding_metrics"] = embedding_metrics
+
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
 
     print(f"wrote predictions: {predictions_path}")
     print(f"wrote metrics: {metrics_path}")
     print(f"evaluated={evaluated} correct={correct} accuracy={metrics['accuracy']}")
+    print(
+        "embedding_metrics: "
+        f"n={embedding_metrics['num_samples']} "
+        f"infonce={embedding_metrics['held_out_infonce_loss']:.4f} "
+        f"alignment={embedding_metrics['alignment']:.4f} "
+        f"uniformity_pred={embedding_metrics['uniformity_pred']:.4f} "
+        f"uniformity_target={embedding_metrics['uniformity_target']:.4f} "
+        f"auc={embedding_metrics['auc']:.4f} "
+        f"margin_mean={embedding_metrics['margin_mean']:.4f}"
+    )
 
 
 def main() -> None:
