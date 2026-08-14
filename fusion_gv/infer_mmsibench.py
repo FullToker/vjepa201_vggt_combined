@@ -19,12 +19,21 @@ Per sample:
 Input manifest rows:
     {"id": ..., "images": ["img_0.jpg", ...], "num_images": ..., "query": "...",
      "target": "...", "candidates": [...], "question_type": "...", "difficulty": "..."}
+
+Also reports embedding-space metrics (held-out InfoNCE loss, alignment/
+uniformity, positive/negative AUC, per-sample margin) via
+evals/embedding_metrics_lib.py -- the same functions evals/embedding_metrics.py,
+fusion_gv/infer_vsibench.py, and openvl/infer_bench.py use, so all are directly
+comparable. Unlike the candidate-match accuracy above (needs "candidates"),
+these only need each row's plain "target" text, so they run for every row
+regardless of mode.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -42,6 +51,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from evals.embedding_metrics_lib import compute_embedding_metrics
 from fusion_gv.gvjepa_trainer import build_model_from_config
 from fusion_gv.infer_gvjepa import _load_checkpoint, _resolve_checkpoint, _score_candidate_batch
 from fusion_gv.preprocess import preprocess
@@ -191,6 +201,15 @@ def main() -> None:
              "batch's GPU forward instead of blocking it. 0 = render synchronously (old behavior).",
     )
     parser.add_argument(
+        "--embedding-metrics-max-samples", type=int, default=None,
+        help="Cap rows feeding evals/embedding_metrics_lib.py's O(n^2) metrics (held-out InfoNCE/"
+             "alignment/uniformity/AUC/margin). Rows are a random.Random(seed).sample(...) over "
+             "dataset indices, same as evals/embedding_metrics.py --num-samples/--seed -- keep "
+             "these and --embedding-metrics-seed equal across scripts to compare results.",
+    )
+    parser.add_argument("--embedding-metrics-temperature", type=float, default=None)
+    parser.add_argument("--embedding-metrics-seed", type=int, default=None)
+    parser.add_argument(
         "--config-section", required=True,
         help="Top-level YAML key to read inference hyperparams from (e.g. 'inference', "
              "'mmsi_inference'). No default -- a merged config can carry more than one "
@@ -212,6 +231,19 @@ def main() -> None:
     heatmap_alpha = args.heatmap_alpha if args.heatmap_alpha is not None else float(icfg.get("heatmap_alpha", 0.35))
     save_grounding = (not args.no_grounding) and icfg.get("save_grounding", True)
     render_workers = args.render_workers if args.render_workers is not None else int(icfg.get("render_workers", 4))
+    embedding_metrics_max_samples = (
+        args.embedding_metrics_max_samples
+        if args.embedding_metrics_max_samples is not None
+        else icfg.get("embedding_metrics_max_samples", 2000)
+    )
+    embedding_metrics_temperature = float(
+        args.embedding_metrics_temperature
+        if args.embedding_metrics_temperature is not None
+        else icfg.get("embedding_metrics_temperature", 0.07)
+    )
+    embedding_metrics_seed = int(
+        args.embedding_metrics_seed if args.embedding_metrics_seed is not None else icfg.get("embedding_metrics_seed", 0)
+    )
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
 
@@ -242,6 +274,19 @@ def main() -> None:
     print(f"Image-count buckets (num_images -> row count): {dict(sorted(bucket_sizes.items()))}")
     print(f"Built {len(batches)} batches (max size {batch_size}, uniform image count per batch)")
 
+    # Which dataset indices feed embedding_metrics -- a random cross-section of
+    # the dataset, not "first N encountered". Rows are grouped by image count
+    # before batching (_bucket_batches above), so just taking the first N rows
+    # in loader order would silently over-sample whichever image-count bucket
+    # happens to be batched first. Matches evals/embedding_metrics.py's own
+    # random.Random(seed).sample(...) sampling.
+    if embedding_metrics_max_samples is None or embedding_metrics_max_samples >= len(dataset):
+        embedding_metrics_indices = None  # use every row
+    else:
+        embedding_metrics_indices = set(
+            random.Random(embedding_metrics_seed).sample(range(len(dataset)), embedding_metrics_max_samples)
+        )
+
     loader = DataLoader(
         dataset,
         batch_sampler=batches,
@@ -267,6 +312,11 @@ def main() -> None:
     per_nimg_total: Dict[int, int] = {}
     per_nimg_correct: Dict[int, int] = {}
     autocast_enabled = dtype is not None and device.type == "cuda"
+
+    # Accumulated on CPU across the whole loop for embedding_metrics_lib's
+    # corpus-level metrics -- only rows in embedding_metrics_indices are kept.
+    metrics_pred_chunks: List[torch.Tensor] = []
+    metrics_target_chunks: List[torch.Tensor] = []
 
     render_pool = ThreadPoolExecutor(max_workers=render_workers) if render_workers > 0 else None
     pending: List[Future] = []
@@ -299,6 +349,19 @@ def main() -> None:
             score_results = _score_candidate_batch(
                 model, pred_embeddings, scoring_candidates, device, include_scores=False
             )
+
+            if embedding_metrics_indices is None:
+                sel_positions = list(range(B))
+            else:
+                sel_positions = [
+                    i for i, ridx in enumerate(batch["row_idx"]) if ridx in embedding_metrics_indices
+                ]
+            if sel_positions:
+                sel = torch.tensor(sel_positions, device=pred_embeddings.device)
+                sel_targets = [batch["target"][i] for i in sel_positions]
+                target_emb = model.encode_target(sel_targets, device)
+                metrics_pred_chunks.append(pred_embeddings.index_select(0, sel).float().cpu())
+                metrics_target_chunks.append(target_emb.float().cpu())
 
             sim_scores: List[float | None] = [None] * B
             unscored_idx = [i for i in range(B) if not should_score[i]]
@@ -406,6 +469,15 @@ def main() -> None:
         "save_grounding": save_grounding,
         "heatmap_alpha": heatmap_alpha,
     }
+
+    embedding_metrics = compute_embedding_metrics(
+        torch.cat(metrics_pred_chunks, dim=0),
+        torch.cat(metrics_target_chunks, dim=0),
+        embedding_metrics_temperature,
+    )
+    embedding_metrics["temperature"] = embedding_metrics_temperature
+    metrics["embedding_metrics"] = embedding_metrics
+
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
@@ -414,6 +486,16 @@ def main() -> None:
     print(f"wrote predictions: {predictions_path}")
     print(f"wrote metrics: {metrics_path}")
     print(f"evaluated={evaluated} correct={correct} accuracy={acc}")
+    print(
+        "embedding_metrics: "
+        f"n={embedding_metrics['num_samples']} "
+        f"infonce={embedding_metrics['held_out_infonce_loss']:.4f} "
+        f"alignment={embedding_metrics['alignment']:.4f} "
+        f"uniformity_pred={embedding_metrics['uniformity_pred']:.4f} "
+        f"uniformity_target={embedding_metrics['uniformity_target']:.4f} "
+        f"auc={embedding_metrics['auc']:.4f} "
+        f"margin_mean={embedding_metrics['margin_mean']:.4f}"
+    )
     print(f"sim_count={sim_count} mean_sim_score={sim}")
 
 

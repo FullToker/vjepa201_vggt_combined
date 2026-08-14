@@ -19,6 +19,13 @@ Per sample:
 Input manifest rows:
     {"id": ..., "images": ["frame_0.jpg", ...], "query": "...", "target": "...",
      "question_type": "...", "candidates": [...]}   # candidates optional
+
+Also reports embedding-space metrics (held-out InfoNCE loss, alignment/
+uniformity, positive/negative AUC, per-sample margin) via
+evals/embedding_metrics_lib.py -- the same functions evals/embedding_metrics.py
+and openvl/infer_bench.py use, so all three are directly comparable. Unlike
+the candidate-match accuracy above (needs "candidates"), these only need each
+row's plain "target" text, so they run for every row regardless of mode.
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from evals.embedding_metrics_lib import compute_embedding_metrics
 from fusion_gv.gvjepa_trainer import build_model_from_config
 from fusion_gv.infer_gvjepa import _load_checkpoint, _resolve_checkpoint, _score_candidate_batch
 from fusion_gv.preprocess import preprocess
@@ -233,6 +241,15 @@ def main() -> None:
         help="SPAR-only: cap rows per row['type'] via reservoir sampling (unbiased random N). Unset -> no cap.",
     )
     parser.add_argument(
+        "--embedding-metrics-max-samples", type=int, default=None,
+        help="Cap rows feeding evals/embedding_metrics_lib.py's O(n^2) metrics (held-out InfoNCE/"
+             "alignment/uniformity/AUC/margin). Rows are a random.Random(seed).sample(...) over "
+             "dataset indices, same as evals/embedding_metrics.py --num-samples/--seed -- keep "
+             "these and --embedding-metrics-seed equal across scripts to compare results.",
+    )
+    parser.add_argument("--embedding-metrics-temperature", type=float, default=None)
+    parser.add_argument("--embedding-metrics-seed", type=int, default=None)
+    parser.add_argument(
         "--config-section", required=True,
         help="Top-level YAML key to read inference hyperparams from (e.g. 'inference', "
              "'vsi_inference'). No default -- a merged config can carry more than one "
@@ -260,6 +277,19 @@ def main() -> None:
     else:
         type_filter = set(type_filter_str.split(",")) if type_filter_str else None
     max_per_type = args.max_per_type if args.max_per_type is not None else icfg.get("max_per_type")
+    embedding_metrics_max_samples = (
+        args.embedding_metrics_max_samples
+        if args.embedding_metrics_max_samples is not None
+        else icfg.get("embedding_metrics_max_samples", 2000)
+    )
+    embedding_metrics_temperature = float(
+        args.embedding_metrics_temperature
+        if args.embedding_metrics_temperature is not None
+        else icfg.get("embedding_metrics_temperature", 0.07)
+    )
+    embedding_metrics_seed = int(
+        args.embedding_metrics_seed if args.embedding_metrics_seed is not None else icfg.get("embedding_metrics_seed", 0)
+    )
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
 
@@ -284,6 +314,19 @@ def main() -> None:
 
     dataset = VSIBenchDataset(manifest_path, type_filter=type_filter, max_per_type=max_per_type)
     print(f"dataset rows after filter/sampling: {len(dataset)}")
+
+    # Which dataset indices feed embedding_metrics -- a random cross-section of
+    # the (possibly type-filtered) dataset, not "first N encountered", so the
+    # subset isn't biased toward whichever question_type/image-count bucket the
+    # loader happens to hit first. Matches evals/embedding_metrics.py's own
+    # random.Random(seed).sample(...) sampling.
+    if embedding_metrics_max_samples is None or embedding_metrics_max_samples >= len(dataset):
+        embedding_metrics_indices = None  # use every row
+    else:
+        embedding_metrics_indices = set(
+            random.Random(embedding_metrics_seed).sample(range(len(dataset)), embedding_metrics_max_samples)
+        )
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -308,6 +351,11 @@ def main() -> None:
     per_type_total: Dict[str, int] = {}
     per_type_correct: Dict[str, int] = {}
     autocast_enabled = dtype is not None and device.type == "cuda"
+
+    # Accumulated on CPU across the whole loop for embedding_metrics_lib's
+    # corpus-level metrics -- only rows in embedding_metrics_indices are kept.
+    metrics_pred_chunks: List[torch.Tensor] = []
+    metrics_target_chunks: List[torch.Tensor] = []
 
     # Overlay rendering (matplotlib colormap + PIL blend/encode) is pure CPU
     # work with no torch/GPU dependency -- submit it here instead of calling
@@ -345,6 +393,19 @@ def main() -> None:
             score_results = _score_candidate_batch(
                 model, pred_embeddings, scoring_candidates, device, include_scores=False
             )
+
+            if embedding_metrics_indices is None:
+                sel_positions = list(range(B))
+            else:
+                sel_positions = [
+                    i for i, ridx in enumerate(batch["row_idx"]) if ridx in embedding_metrics_indices
+                ]
+            if sel_positions:
+                sel = torch.tensor(sel_positions, device=pred_embeddings.device)
+                sel_targets = [batch["target"][i] for i in sel_positions]
+                target_emb = model.encode_target(sel_targets, device)
+                metrics_pred_chunks.append(pred_embeddings.index_select(0, sel).float().cpu())
+                metrics_target_chunks.append(target_emb.float().cpu())
 
             # No-candidate rows (most of SPAR: open-ended query->target, no MC
             # options) can't do discriminative matching. Report pred<->target
@@ -455,6 +516,15 @@ def main() -> None:
         "save_grounding": save_grounding,
         "heatmap_alpha": heatmap_alpha,
     }
+
+    embedding_metrics = compute_embedding_metrics(
+        torch.cat(metrics_pred_chunks, dim=0),
+        torch.cat(metrics_target_chunks, dim=0),
+        embedding_metrics_temperature,
+    )
+    embedding_metrics["temperature"] = embedding_metrics_temperature
+    metrics["embedding_metrics"] = embedding_metrics
+
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
@@ -464,6 +534,16 @@ def main() -> None:
     print(f"wrote metrics: {metrics_path}")
     print(f"evaluated={evaluated} correct={correct} accuracy={acc}")
     print(f"sim_count={sim_count} mean_sim_score={sim}")
+    print(
+        "embedding_metrics: "
+        f"n={embedding_metrics['num_samples']} "
+        f"infonce={embedding_metrics['held_out_infonce_loss']:.4f} "
+        f"alignment={embedding_metrics['alignment']:.4f} "
+        f"uniformity_pred={embedding_metrics['uniformity_pred']:.4f} "
+        f"uniformity_target={embedding_metrics['uniformity_target']:.4f} "
+        f"auc={embedding_metrics['auc']:.4f} "
+        f"margin_mean={embedding_metrics['margin_mean']:.4f}"
+    )
 
 
 if __name__ == "__main__":
