@@ -27,10 +27,16 @@ max_target_len: 64
 # embedding_metrics_lib.py metrics (held-out InfoNCE / alignment / uniformity /
 # AUC / per-sample margin) -- see openvl/infer_bench.py::encode_targets.
 # temperature only scales the reported InfoNCE loss, doesn't need to match
-# whatever open-vljepa was originally trained with. max_samples bounds the
-# O(n^2) pairwise similarity matrix on large manifests; null = use every row.
+# whatever open-vljepa was originally trained with. max_samples caps how many
+# rows feed the O(n^2) pairwise similarity matrix on large manifests (null =
+# use every row); the subset is a random.Random(seed).sample(...) over dataset
+# indices (see run_eval's embedding_metrics_indices), same sampling
+# evals/embedding_metrics.py's --num-samples/--seed use on its manifest --
+# keep seed and max_samples equal across both scripts' configs so the two
+# runs' InfoNCE/AUC/margin numbers are comparable.
 embedding_metrics_temperature: 0.07
 embedding_metrics_max_samples: 2000
+embedding_metrics_seed: 0
 
 
 # ── VSI-Bench ──────────────────────────────────────────────────────────────────

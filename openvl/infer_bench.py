@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -118,6 +119,9 @@ class BenchDataset(Dataset):
             "candidates": row.get("candidates"),
             "question_type": row.get("question_type"),
             "id": row.get("id", idx),
+            # Dataset index, distinct from "id" (manifests may override "id") --
+            # used below to pick an unbiased random embedding_metrics subset.
+            "_idx": idx,
         }
 
 
@@ -156,6 +160,7 @@ def make_collate(image_size: int, query_tokenizer, max_query_len: int):
             "candidates": [item["candidates"] for item in items],
             "question_type": [item["question_type"] for item in items],
             "id": [item["id"] for item in items],
+            "_idx": [item["_idx"] for item in items],
         }
 
     return collate
@@ -239,6 +244,7 @@ def run_eval(
     # of the checkpoint's own config -- see evals/embedding_metrics_lib.py.
     embedding_metrics_temperature = float(cfg.get("embedding_metrics_temperature", 0.07))
     embedding_metrics_max_samples = cfg.get("embedding_metrics_max_samples", 2000)
+    embedding_metrics_seed = int(cfg.get("embedding_metrics_seed", 0))
 
     dataset = BenchDataset(manifest_path)
     batches = _bucket_batches(dataset.num_images, batch_size)
@@ -246,6 +252,21 @@ def run_eval(
         f"[{manifest_path}] {len(dataset)} rows -> {len(batches)} batches "
         f"(uniform image count per batch)"
     )
+
+    # Which dataset indices feed embedding_metrics -- chosen by the same
+    # random.Random(seed).sample(...) evals/embedding_metrics.py uses on its
+    # manifest, so the two scripts' N-row subsets are drawn the same way and
+    # their held-out InfoNCE / AUC / margin numbers stay comparable. Rows are
+    # grouped by image count before batching (see _bucket_batches), so just
+    # taking the first N rows encountered would silently over-sample whichever
+    # image-count bucket happens to come first -- not a random cross-section
+    # of the manifest.
+    if embedding_metrics_max_samples is None or embedding_metrics_max_samples >= len(dataset):
+        embedding_metrics_indices = None  # use every row
+    else:
+        embedding_metrics_indices = set(
+            random.Random(embedding_metrics_seed).sample(range(len(dataset)), embedding_metrics_max_samples)
+        )
 
     loader = DataLoader(
         dataset,
@@ -264,11 +285,11 @@ def run_eval(
 
     # Accumulated on CPU across the whole loop for embedding_metrics_lib's
     # corpus-level metrics (held-out InfoNCE / alignment / uniformity / AUC /
-    # margin) -- capped at embedding_metrics_max_samples rows so the O(n^2)
-    # pairwise similarity matrix at the end stays bounded on large manifests.
+    # margin) -- only rows in embedding_metrics_indices are kept (see above),
+    # so the O(n^2) pairwise similarity matrix at the end stays bounded on
+    # large manifests without biasing which rows make it in.
     metrics_pred_chunks: List[torch.Tensor] = []
     metrics_target_chunks: List[torch.Tensor] = []
-    metrics_collected = 0
 
     with open(predictions_path, "w", encoding="utf-8") as out_f:
         for batch in tqdm(loader, desc=f"openvl-zeroshot[{output_dir.name}]"):
@@ -288,11 +309,18 @@ def run_eval(
                     model, target_tokenizer, pred, batch["candidates"], max_target_len, device
                 )
 
-                if embedding_metrics_max_samples is None or metrics_collected < embedding_metrics_max_samples:
-                    target_emb = encode_targets(model, target_tokenizer, batch["target"], max_target_len, device)
-                    metrics_pred_chunks.append(pred.float().cpu())
+                if embedding_metrics_indices is None:
+                    sel_positions = list(range(len(batch["_idx"])))
+                else:
+                    sel_positions = [
+                        pos for pos, ridx in enumerate(batch["_idx"]) if ridx in embedding_metrics_indices
+                    ]
+                if sel_positions:
+                    sel = torch.tensor(sel_positions, device=pred.device)
+                    sel_targets = [batch["target"][pos] for pos in sel_positions]
+                    target_emb = encode_targets(model, target_tokenizer, sel_targets, max_target_len, device)
+                    metrics_pred_chunks.append(pred.index_select(0, sel).float().cpu())
                     metrics_target_chunks.append(target_emb.float().cpu())
-                    metrics_collected += len(batch["target"])
 
             B = pixel_values.shape[0]
             for i in range(B):
