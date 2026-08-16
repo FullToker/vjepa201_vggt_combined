@@ -1,29 +1,42 @@
 #!/bin/bash
-#SBATCH --job-name=infer_spar_eval_old
+#SBATCH --job-name=infer_spar_eval_old_sample9k
 #SBATCH --partition=geo
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=3-00:00:00
-#SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/infer_spar_eval_old_%j.out
-#SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/infer_spar_eval_old_%j.err
+#SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/infer_spar_eval_old_sample9k/%j.out
+#SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/infer_spar_eval_old_sample9k/%j.err
 
-# Runs the old SPAR select-format eval (spar_sftqa_eval_old.jsonl) against
-# both open-vljepa-warm-started SFT checkpoints, one per GPU, in parallel.
-# infer_gvjepa.py is single-process (no accelerate) -- CUDA_VISIBLE_DEVICES
-# pins each run to its own GPU instead of splitting one run across both.
+# Runs the old SPAR select-format eval against both open-vljepa-warm-started
+# SFT checkpoints, one per GPU, in parallel. infer_gvjepa.py is single-process
+# (no accelerate) -- CUDA_VISIBLE_DEVICES pins each run to its own GPU instead
+# of splitting one run across both.
+#
+# Uses spar_sftqa_eval_old_3k.jsonl (pre-sampled subset) instead of the full
+# manifest -- the full file was estimated at ~155h, too long to wait out, and
+# a --time timeout would kill the job mid-run with no metrics.json at all
+# (that file is only written after the full loop finishes -- see
+# infer_gvjepa.py) plus a predictions.jsonl covering only whatever source/type
+# happened to be first in file order (convert_spar_sftqa.py writes
+# source-by-source, not shuffled).
 #
 # Requires both SFT runs to already have written final.pt:
 #   fusion_gv/trainbatch/sft_from_vljepa_ckpt.sbatch            -> vjepa-only
 #   fusion_gv/trainbatch/sft_from_vljepa_ckpt_fusion_gv.sbatch  -> VGGT+JEPA
+#
+# The #SBATCH --output/--error paths above are opened by Slurm before this
+# script body runs, so mkdir -p inside the script is too late for THOSE two --
+# create the folder once before first submission:
+#   mkdir -p /glob/g01-cache/pf/Yushuo/vjepa201/logs/infer_spar_eval_old_sample9k
 
 set -euo pipefail
 
 ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
-EVAL_JSONL="/glob/g01-cache/pf/Yushuo/vjepa201/data/spar_sftqa_eval_old.jsonl"
+EVAL_JSONL="/glob/g01-cache/pf/Yushuo/vjepa201/data/spar_sftqa_eval_old_3k.jsonl"
 
-mkdir -p "$ROOT/logs"
+mkdir -p "$ROOT/logs/infer_spar_eval_old_sample9k"
 
 CUDA_VISIBLE_DEVICES=0 singularity exec \
     --nv \
@@ -35,8 +48,8 @@ CUDA_VISIBLE_DEVICES=0 singularity exec \
         --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml \
         --checkpoint ./outputs/sft_from_vljepa_ckpt/final.pt \
         --input "$EVAL_JSONL" \
-        --output ./outputs/inference/spar_eval_old_vjepa/predictions.jsonl \
-        --metrics-output ./outputs/inference/spar_eval_old_vjepa/metrics.json \
+        --output ./outputs/inference/spar_eval_old_vjepa_sample9k/predictions.jsonl \
+        --metrics-output ./outputs/inference/spar_eval_old_vjepa_sample9k/metrics.json \
         --mode select &
 pid_vjepa=$!
 
@@ -50,8 +63,8 @@ CUDA_VISIBLE_DEVICES=1 singularity exec \
         --config fusion_gv/configs/sft_from_vljepa_ckpt_fusion_gv.yaml \
         --checkpoint ./outputs/sft_from_vljepa_ckpt_fusion_gv/final.pt \
         --input "$EVAL_JSONL" \
-        --output ./outputs/inference/spar_eval_old_fusion_gv/predictions.jsonl \
-        --metrics-output ./outputs/inference/spar_eval_old_fusion_gv/metrics.json \
+        --output ./outputs/inference/spar_eval_old_fusion_gv_sample9k/predictions.jsonl \
+        --metrics-output ./outputs/inference/spar_eval_old_fusion_gv_sample9k/metrics.json \
         --mode select &
 pid_fusion_gv=$!
 
