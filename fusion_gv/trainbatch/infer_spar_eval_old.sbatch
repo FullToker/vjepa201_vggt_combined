@@ -22,8 +22,8 @@
 # source-by-source, not shuffled).
 #
 # Requires both SFT runs to already have written final.pt:
-#   fusion_gv/trainbatch/sft_from_vljepa_ckpt.sbatch            -> vjepa-only
-#   fusion_gv/trainbatch/sft_from_vljepa_ckpt_fusion_gv.sbatch  -> VGGT+JEPA
+#   fusion_gv/trainbatch/sft_from_vljepa_ckpt.sbatch          -> vjepa-only
+#   fusion_gv/trainbatch/sft_from_vljepa_ckpt_fusiongv.sbatch -> VGGT+JEPA
 #
 # The #SBATCH --output/--error paths above are opened by Slurm before this
 # script body runs, so mkdir -p inside the script is too late for THOSE two --
@@ -60,11 +60,11 @@ CUDA_VISIBLE_DEVICES=1 singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
     python fusion_gv/infer_gvjepa.py \
-        --config fusion_gv/configs/sft_from_vljepa_ckpt_fusion_gv.yaml \
-        --checkpoint ./outputs/sft_from_vljepa_ckpt_fusion_gv/final.pt \
+        --config fusion_gv/configs/sft_from_vljepa_ckpt_fusiongv.yaml \
+        --checkpoint ./outputs/sft_from_vljepa_ckpt_fusiongv/final.pt \
         --input "$EVAL_JSONL" \
-        --output ./outputs/inference/spar_eval_old_fusion_gv_sample9k/predictions.jsonl \
-        --metrics-output ./outputs/inference/spar_eval_old_fusion_gv_sample9k/metrics.json \
+        --output ./outputs/inference/spar_eval_old_fusiongv_sample9k/predictions.jsonl \
+        --metrics-output ./outputs/inference/spar_eval_old_fusiongv_sample9k/metrics.json \
         --mode select &
 pid_fusion_gv=$!
 
