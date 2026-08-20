@@ -11,9 +11,18 @@
 #   - raw_input() gates (TOS confirmation, task_data continue, full-release
 #     size warning) replaced with `if not args.yes: input(...)` so a
 #     non-interactive sbatch run can pass --yes instead of blocking forever.
+#   - download_file() retries a dropped/short transfer (ContentTooShortError,
+#     seen in practice on this cluster's network to kaldir.vc.cit.tum.de)
+#     instead of letting it kill the entire download_release loop -- a single
+#     scan's single file used to abort all ~90 houses. Failed attempts clean
+#     up their partial temp file; giving up after max_retries just skips that
+#     file (logged) so the rest of the release still downloads -- rerun the
+#     job afterward to pick up whatever got skipped.
 import argparse
 import os
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 BASE_URL = 'http://kaldir.vc.cit.tum.de/matterport/'
@@ -75,17 +84,28 @@ def download_release(release_scans, out_dir, file_types):
     print('Downloaded MP release.')
 
 
-def download_file(url, out_file):
+def download_file(url, out_file, max_retries=3):
     out_dir = os.path.dirname(out_file)
-    if not os.path.isfile(out_file):
-        print('\t' + url + ' > ' + out_file)
-        fh, out_file_tmp = tempfile.mkstemp(dir=out_dir)
-        f = os.fdopen(fh, 'w')
-        f.close()
-        urllib.request.urlretrieve(url, out_file_tmp)
-        os.rename(out_file_tmp, out_file)
-    else:
+    if os.path.isfile(out_file):
         print('WARNING: skipping download of existing file ' + out_file)
+        return
+
+    print('\t' + url + ' > ' + out_file)
+    for attempt in range(1, max_retries + 1):
+        fh, out_file_tmp = tempfile.mkstemp(dir=out_dir)
+        os.close(fh)
+        try:
+            urllib.request.urlretrieve(url, out_file_tmp)
+            os.rename(out_file_tmp, out_file)
+            return
+        except (urllib.error.ContentTooShortError, OSError, urllib.error.URLError) as e:
+            if os.path.exists(out_file_tmp):
+                os.remove(out_file_tmp)
+            if attempt == max_retries:
+                print(f'ERROR: giving up on {url} after {max_retries} attempts ({e}) -- skipping, rerun the job to retry.')
+                return
+            print(f'WARNING: attempt {attempt}/{max_retries} failed for {url} ({e}), retrying...')
+            time.sleep(5 * attempt)
 
 def download_scan(scan_id, out_dir, file_types):
     print('Downloading MP scan ' + scan_id + ' ...')
