@@ -28,6 +28,13 @@ CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 LOGDIR="${LOGDIR:-outputs}"
 PORT=6006
 
+# Pin cwd to the project root so a relative LOGDIR always means the same
+# thing regardless of which directory `sbatch` was invoked from -- otherwise
+# this job's "outputs" and profile_gvjepa.sbatch's "outputs" can silently
+# resolve to two different places if the two were submitted from different
+# directories (this is exactly what happened before this line was added).
+cd "$ROOT"
+
 # User-level shared package dir, same convention as mlflow_server.sbatch --
 # lives outside the project dir (/glob/g01-cache/pf/Yushuo, not .../vjepa201)
 # since it's a general "extra pip packages" location, not project state.
