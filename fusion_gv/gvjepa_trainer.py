@@ -705,6 +705,11 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     g = cfg.get("grounding", {})
     model_cfg = GVJEPAConfig(
         fusion=fusion_cfg,
+        visual_pool_k=m.get("visual_pool_k", 1),
+        visual_pool_layers=m.get("visual_pool_layers", 1),
+        visual_pool_heads=m.get("visual_pool_heads", 8),
+        visual_pool_ffn_mult=m.get("visual_pool_ffn_mult", 4),
+        visual_pool_dropout=m.get("visual_pool_dropout", 0.0),
         # toy predictor path only (ignored when query_model_name != "toy")
         predictor_hidden_size=m.get("predictor_hidden_size", 512),
         predictor_layers=m.get("predictor_layers", 6),

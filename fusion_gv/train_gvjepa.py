@@ -104,6 +104,14 @@ def main() -> None:
         "--profile-steps", type=int, default=10,
         help="Number of actively-recorded steps when --profile is set (default: 10)",
     )
+    parser.add_argument(
+        "--visual-pool-k", type=int, default=None,
+        help="Override model.visual_pool_k (VisualResampler tokens/frame) from the YAML config",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Override train.output_dir from the YAML config",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -114,6 +122,10 @@ def main() -> None:
         cfg["fusion"]["x_encoder_type"] = args.x_encoder_type
     if args.x_encoder_output_dim is not None:
         cfg["fusion"]["x_encoder_output_dim"] = args.x_encoder_output_dim
+    if args.visual_pool_k is not None:
+        cfg.setdefault("model", {})["visual_pool_k"] = args.visual_pool_k
+    if args.output_dir is not None:
+        cfg["train"]["output_dir"] = args.output_dir
 
     tcfg = cfg["train"]
     precision = tcfg.get("precision", "bf16")
