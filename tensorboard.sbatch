@@ -7,15 +7,10 @@
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/tensorboard_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/tensorboard_%j.err
 
-# View a torch.profiler trace in TensorBoard. Launch-only -- no install
-# logic here. One-time env setup (venv + tensorboard-plugin-profile) is done
-# interactively first, see the chat for the exact commands:
-#   srun --partition=geo --cpus-per-task=2 --mem=8G --time=01:00:00 --pty \
-#       singularity exec --bind /glob/g01-cache:/glob/g01-cache \
-#       /glob/g01-cache/container/nvpytorch24.05-py3.simg bash
-#   python3 -m venv --system-site-packages /glob/g01-cache/pf/Yushuo/venv-tensorboard
-#   source /glob/g01-cache/pf/Yushuo/venv-tensorboard/bin/activate
-#   pip install tensorboard-plugin-profile
+# View a torch.profiler trace in TensorBoard, using nvpytorch24.05-py3.simg's
+# own bundled tensorboard directly -- no venv, no pip install, no PYTHONPATH
+# tricks. If that image's tensorboard doesn't have tensorboard_plugin_profile,
+# every other tab still works; only the PYTORCH_PROFILER tab would be missing.
 #
 # Log dir must exist BEFORE first submission (Slurm opens --output/--error
 # before this script body runs):
@@ -28,7 +23,6 @@ set -euo pipefail
 
 ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/container/nvpytorch24.05-py3.simg"
-VENV="/glob/g01-cache/pf/Yushuo/venv-tensorboard"
 LOGDIR="${LOGDIR:-outputs}"
 PORT=6006
 
@@ -49,4 +43,4 @@ echo "============================================"
 srun singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
-    $VENV/bin/tensorboard --logdir "$LOGDIR" --port $PORT --bind_all
+    tensorboard --logdir "$LOGDIR" --port $PORT --bind_all
