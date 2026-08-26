@@ -55,6 +55,7 @@ from evals.embedding_metrics_lib import compute_embedding_metrics
 from fusion_gv.gvjepa_trainer import build_model_from_config
 from fusion_gv.infer_gvjepa import _load_checkpoint, _resolve_checkpoint, _score_candidate_batch
 from fusion_gv.preprocess import preprocess
+from fusion_gv.profiling import maybe_profile, prof_step
 
 
 def _sanitize_id(value: Any) -> str:
@@ -210,6 +211,17 @@ def main() -> None:
     parser.add_argument("--embedding-metrics-temperature", type=float, default=None)
     parser.add_argument("--embedding-metrics-seed", type=int, default=None)
     parser.add_argument(
+        "--profile", action="store_true",
+        help="Opt-in torch.profiler trace of the first few inference batches "
+             "(written to <output_dir>/profiler_trace). Off by default -- no "
+             "profiler object is built and the loop runs unaffected unless "
+             "this flag is passed. See fusion_gv/profiling.py.",
+    )
+    parser.add_argument(
+        "--profile-steps", type=int, default=10,
+        help="Number of actively-recorded batches when --profile is set (default: 10)",
+    )
+    parser.add_argument(
         "--config-section", required=True,
         help="Top-level YAML key to read inference hyperparams from (e.g. 'inference', "
              "'mmsi_inference'). No default -- a merged config can carry more than one "
@@ -321,8 +333,14 @@ def main() -> None:
     render_pool = ThreadPoolExecutor(max_workers=render_workers) if render_workers > 0 else None
     pending: List[Future] = []
 
+    # Opt-in only (--profile defaults False -> nullcontext(), __enter__()
+    # returns None, prof_step() below no-ops -- see fusion_gv/profiling.py).
+    prof_cm = maybe_profile(args.profile, output_dir / "profiler_trace", active_steps=args.profile_steps)
+    prof = prof_cm.__enter__()
+
     with open(predictions_path, "w", encoding="utf-8") as out_f, torch.no_grad():
         for batch in tqdm(loader, desc="mmsibench-infer"):
+            prof_step(prof)
             images_vggt = batch["images_vggt"].to(device) if batch["images_vggt"] is not None else None
             images_jepa = batch["images_jepa"].to(device)
             queries = batch["query"]
@@ -435,6 +453,8 @@ def main() -> None:
                     "checkpoint": str(checkpoint_path),
                     "step": step,
                 }, ensure_ascii=False) + "\n")
+
+    prof_cm.__exit__(None, None, None)
 
     if render_pool is not None:
         for fut in pending:

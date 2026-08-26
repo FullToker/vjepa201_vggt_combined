@@ -48,6 +48,7 @@ from tqdm import tqdm
 
 from fusion_gv.gvjepa import FusionGVJEPA
 from fusion_gv.preprocess import preprocess
+from fusion_gv.profiling import maybe_profile, prof_step
 
 
 # ── Grounding helpers ──────────────────────────────────────────────────────────
@@ -314,6 +315,8 @@ class GVJEPATrainer:
         grounding_ema_decay: float = 0.98,
         mlflow_logger=None,
         accelerator=None,
+        profile: bool = False,
+        profile_steps: int = 10,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("`max_steps` must be > 0.")
@@ -351,6 +354,11 @@ class GVJEPATrainer:
         # that first value directly rather than decayed in from 0, so the
         # early steps aren't biased toward an artificial near-zero EMA.
         self._grounding_ema: float | None = None
+        # Opt-in only -- see fusion_gv/profiling.py. False (default) means
+        # fit()'s `with maybe_profile(...)` resolves to nullcontext(), no
+        # torch.profiler object is ever built, loop runs exactly as before.
+        self.profile = profile
+        self.profile_steps = profile_steps
         if self.accelerator.is_main_process:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -509,6 +517,17 @@ class GVJEPATrainer:
         running_grounding_ema = 0.0
         pbar = tqdm(total=self.max_steps, desc="gvjepa-train", disable=not is_main)
 
+        # Opt-in only (self.profile defaults False -> nullcontext(), __enter__()
+        # returns None, prof_step() below no-ops -- see fusion_gv/profiling.py).
+        # Main-process only under DDP -- every rank hitting the same trace_dir
+        # would clash; a single rank's trace is enough to see kernel-level cost.
+        # Manual enter/exit instead of `with` so the loop body below doesn't
+        # need reindenting.
+        prof_cm = maybe_profile(
+            self.profile and is_main, self.output_dir / "profiler_trace", active_steps=self.profile_steps
+        )
+        prof = prof_cm.__enter__()
+
         while step < self.max_steps:
             use_grounding = (
                 grounding_iter is not None
@@ -574,6 +593,7 @@ class GVJEPATrainer:
 
             step += 1
             pbar.update(1)
+            prof_step(prof)
 
             if step % self.log_every == 0:
                 entry = {
@@ -621,6 +641,8 @@ class GVJEPATrainer:
 
             if step >= self.max_steps:
                 break
+
+        prof_cm.__exit__(None, None, None)
 
         if is_main:
             final_ckpt = self._save_ckpt(step, filename="final.pt")

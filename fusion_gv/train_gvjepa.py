@@ -93,6 +93,17 @@ def main() -> None:
         "--overfit-steps", type=int, default=200,
         help="Steps to run in overfit test (default: 200)",
     )
+    parser.add_argument(
+        "--profile", action="store_true",
+        help="Opt-in torch.profiler trace of the first few train steps "
+             "(written to <output_dir>/profiler_trace). Off by default -- "
+             "no profiler object is built and the loop runs unaffected "
+             "unless this flag is passed. See fusion_gv/profiling.py.",
+    )
+    parser.add_argument(
+        "--profile-steps", type=int, default=10,
+        help="Number of actively-recorded steps when --profile is set (default: 10)",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -181,6 +192,8 @@ def main() -> None:
             grounding_ema_decay=gcfg.get("ema_decay", 0.98),
             mlflow_logger=mlflow_logger,
             accelerator=accelerator,
+            profile=args.profile,
+            profile_steps=args.profile_steps,
         )
         trainer.fit()
 
