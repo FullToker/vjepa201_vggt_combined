@@ -6,11 +6,13 @@ Architecture (paper: arXiv 2512.10942v2)
     FusionGV (X-encoder, frozen encoders + final-level fusion)
         → (B, S, 1369, D_fused)   D_fused = 2 * proj_dim (default 2048)
 
-    spatial mean-pool
-        → (B, S, D_fused)
+    VisualResampler (K learnable queries cross-attend over each frame's
+    patch tokens — Perceiver-style, content-adaptive; generalizes mean-pool)
+        → (B, S*K, D_fused)       K = config.visual_pool_k (hyperparameter)
 
-    vis_proj  → (B, S, D_pred)
-        + modality_embed[visual] + frame_embed(frame_ids)   (no order/distance)
+    vis_proj  → (B, S*K, D_pred)
+        + modality_embed[visual] + frame_embed(frame_ids)   (same frame_ids
+          row repeated across a frame's K tokens; no order/distance)
 
     query_in_proj(embed_tokens(query_ids))  → (B, L, D_pred)
         + modality_embed[query] (+ query_pos_embed sincos — toy path only;
@@ -35,6 +37,7 @@ Architecture (paper: arXiv 2512.10942v2)
 
 Trainable parameters:
     - fusion module inside FusionGV          (main LR)
+    - visual_resampler                       (main LR)
     - vis_proj, query_in_proj                (main LR)
     - modality_embed, frame_embed            (main LR)
     - predictor, pred_proj                   (main LR)
@@ -70,7 +73,7 @@ import torch.nn as nn
 
 from app.vjepa_2_1.models.utils.pos_embs import get_1d_sincos_pos_embed
 from fusion_gv.config import FusionConfig
-from fusion_gv.grounding_head import GroundingHead
+from fusion_gv.grounding_head import CrossAttnLayer, GroundingHead
 from fusion_gv.llama_predictor import LlamaPredictor
 from fusion_gv.model import build_x_encoder
 
@@ -148,6 +151,45 @@ class _ToyTextEncoder(nn.Module):
         return SimpleNamespace(last_hidden_state=self.norm(self.embedding(input_ids)))
 
 
+# ── Visual resampler ─────────────────────────────────────────────────────────
+
+class VisualResampler(nn.Module):
+    """Perceiver-style learnable pooling: K learnable queries cross-attend
+    over each frame's patch tokens, replacing spatial mean-pool with
+    content-adaptive pooling. K is a hyperparameter (config.visual_pool_k)
+    — the predictor's self-attention cost scales with (num_frames*K + L)^2,
+    so K trades spatial fidelity against predictor compute.
+
+    Reuses CrossAttnLayer from grounding_head.py (same cross-attention
+    building block, just refining K learned queries instead of a
+    predictor-conditioned query).
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        k: int,
+        num_layers: int = 1,
+        num_heads: int = 8,
+        ffn_mult: int = 4,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        assert k >= 1, "visual_pool_k must be >= 1"
+        self.k = k
+        self.query = nn.Parameter(torch.randn(k, dim) * dim**-0.5)
+        self.layers = nn.ModuleList(
+            [CrossAttnLayer(dim, num_heads, ffn_mult, dropout) for _ in range(num_layers)]
+        )
+
+    def forward(self, patches: torch.Tensor) -> torch.Tensor:
+        """patches: (N, P, dim) → (N, K, dim), N = B * num_frames."""
+        q = self.query.unsqueeze(0).expand(patches.shape[0], -1, -1)
+        for layer in self.layers:
+            q, _ = layer(q, patches)
+        return q
+
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -156,6 +198,19 @@ class GVJEPAConfig:
 
     # Visual fusion encoder
     fusion: FusionConfig = field(default_factory=FusionConfig)
+
+    # Visual resampler (replaces spatial mean-pool): K learnable queries
+    # cross-attend over each frame's patch tokens (Perceiver-style,
+    # content-adaptive pooling). K is the main compute/fidelity knob —
+    # predictor self-attention cost is O((num_frames*K + L)^2). K=1 keeps
+    # today's token budget but is a *learned* single-token pool, not a
+    # literal average — old mean-pool checkpoints do not transfer to
+    # visual_resampler's weights and it needs (re)training.
+    visual_pool_k: int = 1
+    visual_pool_layers: int = 1
+    visual_pool_heads: int = 8
+    visual_pool_ffn_mult: int = 4
+    visual_pool_dropout: float = 0.0
 
     # Predictor. When query_model_name == "toy": a small bidirectional
     # nn.TransformerEncoder sized by the fields below (fast, no download).
@@ -221,6 +276,16 @@ class FusionGVJEPA(nn.Module):
         # ── X-encoder (visual) ───────────────────────────────────────────────
         self.x_encoder = build_x_encoder(config.fusion)
 
+        # ── Visual resampler (replaces spatial mean-pool) ─────────────────────
+        self.visual_resampler = VisualResampler(
+            dim=D_fused,
+            k=config.visual_pool_k,
+            num_layers=config.visual_pool_layers,
+            num_heads=config.visual_pool_heads,
+            ffn_mult=config.visual_pool_ffn_mult,
+            dropout=config.visual_pool_dropout,
+        )
+
         # ── Predictor + query tokenizer ───────────────────────────────────────
         self._use_llama_predictor = config.query_model_name != "toy"
 
@@ -272,9 +337,9 @@ class FusionGVJEPA(nn.Module):
         # modality_embed: 0=visual, 1=query — lets the predictor tell the two
         # streams apart (it otherwise has no positional signal at all).
         self.modality_embed = nn.Embedding(2, h)
-        # frame_embed: per-frame group tag. Same row added to every token of a
-        # given frame (K=1 today via mean-pool; K>1 later via a resampler would
-        # broadcast the same row over all K). No order/distance semantics —
+        # frame_embed: per-frame group tag. Same row broadcast over every one
+        # of a frame's K tokens (K = config.visual_pool_k, via VisualResampler
+        # — see frame_ids in _run_predictor). No order/distance semantics —
         # frame sampling here carries no temporal meaning, so this is a pure
         # "same-group" marker, not a position encoding.
         self.frame_embed = nn.Embedding(_S_MAX, h)
@@ -336,7 +401,8 @@ class FusionGVJEPA(nn.Module):
         images_jepa: torch.Tensor,
         batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the X-encoder and spatially mean-pool its final-level output.
+        """Run the X-encoder and pool its final-level output via the
+        learnable VisualResampler (K tokens/frame, frame-major layout).
 
         Args:
             images_vggt: may be None under x_encoder_type="vjepa" when the
@@ -347,11 +413,15 @@ class FusionGVJEPA(nn.Module):
                 carries both numbers) is None.
 
         Returns:
-            pooled:  (B, S, D_f)       mean-pooled over patches
+            pooled:  (B, S*K, D_f)     K resampled tokens/frame, frame-major
+                                        (frame0_tok0..K-1, frame1_tok0..K-1, ...)
             spatial: (B, S, P, D_f)    raw patch features before pooling
         """
         feat = self.x_encoder(images_vggt, images_jepa, batch_size)   # (B, S, P, D_f)
-        return feat.mean(dim=2), feat                      # (B,S,D_f), (B,S,P,D_f)
+        B, S, P, D_f = feat.shape
+        pooled = self.visual_resampler(feat.reshape(B * S, P, D_f))   # (B*S, K, D_f)
+        pooled = pooled.reshape(B, S * self.visual_resampler.k, D_f)  # frame-major
+        return pooled, feat                                 # (B,S*K,D_f), (B,S,P,D_f)
 
     def _tokenize(self, tokenizer, texts: list[str], max_length: int, device: torch.device):
         out = tokenizer(
@@ -398,11 +468,14 @@ class FusionGVJEPA(nn.Module):
         B = len(queries)
 
         pooled_vis, spatial = self._pool_visual(images_vggt, images_jepa, B)
-        vis = self.vis_proj(pooled_vis)   # (B, S, h)
+        vis = self.vis_proj(pooled_vis)   # (B, S, h), S = num_frames * K
         S = vis.shape[1]
-        assert S <= _S_MAX, f"frame_embed only covers {_S_MAX} frames, got S={S}"
+        S_frames = spatial.shape[1]
+        assert S_frames <= _S_MAX, f"frame_embed only covers {_S_MAX} frames, got S={S_frames}"
 
-        frame_ids = torch.arange(S, device=device)
+        # Same frame_ids row repeated across each frame's K tokens (frame-major
+        # layout from _pool_visual) — a pure "same-group" marker, not a K-index.
+        frame_ids = torch.arange(S_frames, device=device).repeat_interleave(S // S_frames)
         vis = vis + self.modality_embed.weight[0] + self.frame_embed(frame_ids)  # (B,S,h)
 
         q_tok = self._tokenize(
