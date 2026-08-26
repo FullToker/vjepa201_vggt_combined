@@ -35,11 +35,15 @@ PORT=6006
 # directories (this is exactly what happened before this line was added).
 cd "$ROOT"
 
-# User-level shared package dir, same convention as mlflow_server.sbatch --
-# lives outside the project dir (/glob/g01-cache/pf/Yushuo, not .../vjepa201)
-# since it's a general "extra pip packages" location, not project state.
-PYLIBS="/glob/g01-cache/pf/Yushuo/pylibs"
-PIPTMP="/glob/g01-cache/pf/Yushuo/tmp"
+# Own dir, NOT mlflow_server.sbatch's /glob/g01-cache/pf/Yushuo/pylibs --
+# a shared `pip install --target` dir is fragile once two unrelated tools'
+# dependency trees land in the same flat directory (this bit us once
+# already: installing tensorboard-plugin-profile there dragged in a
+# numpy/protobuf/markupsafe/cryptography version that conflicts with what
+# mlflow's deps expect, and left numpy partially broken for both). Isolated
+# per-tool target dirs avoid that class of conflict entirely.
+PYLIBS="/glob/g01-cache/pf/Yushuo/pylibs-tensorboard"
+PIPTMP="/glob/g01-cache/pf/Yushuo/tmp-tensorboard"
 
 mkdir -p "$ROOT/logs"
 
