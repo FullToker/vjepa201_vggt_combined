@@ -46,4 +46,13 @@ srun singularity exec \
     -H $ROOT:/home/go98qit \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
-    tensorboard --logdir "$LOGDIR" --port $PORT --bind_all
+    bash -c "
+        mkdir -p $ROOT/pylibs $ROOT/tmp && \
+        if ! PYTHONPATH=$ROOT/pylibs python3 -c 'import tensorboard_plugin_profile' 2>/dev/null; then \
+            echo 'Installing tensorboard-plugin-profile (PYTORCH_PROFILER tab needs this, not bundled with plain tensorboard)...' && \
+            TMPDIR=$ROOT/tmp \
+            pip install --quiet --target=$ROOT/pylibs tensorboard-plugin-profile; \
+        fi && \
+        PYTHONPATH=$ROOT/pylibs \
+        tensorboard --logdir '$LOGDIR' --port $PORT --bind_all
+    "
