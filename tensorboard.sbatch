@@ -59,4 +59,4 @@ echo "============================================"
 srun singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
-    $VENV/bin/tensorboard --logdir "$LOGDIR" --port $PORT --bind_all
+    $VENV/bin/python3 -m tensorboard.main --logdir "$LOGDIR" --port $PORT --bind_all
