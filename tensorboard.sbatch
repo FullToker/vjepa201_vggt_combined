@@ -28,6 +28,12 @@ CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 LOGDIR="${LOGDIR:-outputs}"
 PORT=6006
 
+# User-level shared package dir, same convention as mlflow_server.sbatch --
+# lives outside the project dir (/glob/g01-cache/pf/Yushuo, not .../vjepa201)
+# since it's a general "extra pip packages" location, not project state.
+PYLIBS="/glob/g01-cache/pf/Yushuo/pylibs"
+PIPTMP="/glob/g01-cache/pf/Yushuo/tmp"
+
 mkdir -p "$ROOT/logs"
 
 NODE=$(hostname)
@@ -47,12 +53,12 @@ srun singularity exec \
     --bind /glob/g01-cache:/glob/g01-cache \
     $CONTAINER \
     bash -c "
-        mkdir -p $ROOT/pylibs $ROOT/tmp && \
-        if ! PYTHONPATH=$ROOT/pylibs python3 -c 'import tensorboard_plugin_profile' 2>/dev/null; then \
+        mkdir -p $PYLIBS $PIPTMP && \
+        if ! PYTHONPATH=$PYLIBS python3 -c 'import tensorboard_plugin_profile' 2>/dev/null; then \
             echo 'Installing tensorboard-plugin-profile (PYTORCH_PROFILER tab needs this, not bundled with plain tensorboard)...' && \
-            TMPDIR=$ROOT/tmp \
-            pip install --quiet --target=$ROOT/pylibs tensorboard-plugin-profile; \
+            TMPDIR=$PIPTMP \
+            pip install --quiet --target=$PYLIBS tensorboard-plugin-profile; \
         fi && \
-        PYTHONPATH=$ROOT/pylibs \
+        PYTHONPATH=$PYLIBS \
         tensorboard --logdir '$LOGDIR' --port $PORT --bind_all
     "
