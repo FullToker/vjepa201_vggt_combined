@@ -383,7 +383,7 @@ def main() -> None:
     prof = prof_cm.__enter__()
 
     with open(predictions_path, "w", encoding="utf-8") as out_f, torch.no_grad():
-        for batch in tqdm(loader, desc="vsibench-infer"):
+        for _profile_idx, batch in enumerate(tqdm(loader, desc="vsibench-infer")):
             prof_step(prof)
             images_vggt = batch["images_vggt"].to(device) if batch["images_vggt"] is not None else None
             images_jepa = batch["images_jepa"].to(device)
@@ -507,6 +507,13 @@ def main() -> None:
                     "checkpoint": str(checkpoint_path),
                     "step": step,
                 }, ensure_ascii=False) + "\n")
+
+            # Profiling-only early exit -- the trace only needs wait+warmup+
+            # active_steps (fusion_gv/profiling.py's schedule, wait=1 warmup=1
+            # by default); running the rest of a large manifest afterward is
+            # pure waste for a profiling run. No effect when --profile is unset.
+            if args.profile and _profile_idx + 1 >= 2 + args.profile_steps:
+                break
 
     prof_cm.__exit__(None, None, None)
 
