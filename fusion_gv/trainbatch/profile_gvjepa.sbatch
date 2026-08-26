@@ -19,29 +19,27 @@
 # passes it, so runs kicked off here always carry the profiling overhead;
 # nothing else in the repo is affected by this script existing.
 #
-# Uses --overfit (frozen batch, repeated) purely to get a fast, deterministic
-# handful of steps — the loss/accuracy numbers from this run are meaningless,
-# same caveat as the overfit sanity check. train.output_dir below is a
-# SEPARATE dir from both the real run and the overfit sanity check, so this
-# never touches either of their checkpoints.
+# Own config/output_dir, not shared with the overfit sanity check -- avoids
+# trace files from different runs piling up in the same profiler_trace/.
 #
-# Override the config to profile the vjepa-only path instead:
-#   CONFIG=fusion_gv/configs/overfit_from_vljepa_ckpt.yaml sbatch fusion_gv/trainbatch/profile_gvjepa.sbatch
+# Override for vjepa-only path:
+#   CONFIG=fusion_gv/configs/profile_gvjepa_vjepa.yaml sbatch fusion_gv/trainbatch/profile_gvjepa.sbatch
 #
-# View the result (paths follow CONFIG's train.output_dir / vsi_inference.output_dir --
-# for the default fusiongv overfit config that's):
-#   tensorboard --logdir outputs/sft_from_vljepa_ckpt_fusiongv_overfit/profiler_trace
-#   tensorboard --logdir outputs/inference/sft_from_vljepa_ckpt_fusiongv_overfit/vsibench/profiler_trace
+# View: tensorboard --logdir outputs/profile_gvjepa_fusiongv/profiler_trace
 
 set -euo pipefail
 
 ROOT="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 LOG_DIR="$ROOT/logs/profile_gvjepa"
-CONFIG="${CONFIG:-fusion_gv/configs/overfit_from_vljepa_ckpt_fusiongv.yaml}"
+CONFIG="${CONFIG:-fusion_gv/configs/profile_gvjepa_fusiongv.yaml}"
 PROFILE_STEPS="${PROFILE_STEPS:-10}"
 
 mkdir -p "$LOG_DIR"
+
+# Clear stale trace files from earlier runs of this same config.
+RUN_NAME=$(basename "$CONFIG" .yaml)
+rm -rf "outputs/$RUN_NAME/profiler_trace" "outputs/inference/$RUN_NAME/vsibench/profiler_trace"
 
 SIF="srun singularity exec \
     --nv \

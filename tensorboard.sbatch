@@ -2,8 +2,8 @@
 #SBATCH --job-name=tensorboard
 #SBATCH --partition=geo
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
-#SBATCH --time=04:00:00
+#SBATCH --mem=32G
+#SBATCH --time=4-00:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/tensorboard_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/tensorboard_%j.err
 

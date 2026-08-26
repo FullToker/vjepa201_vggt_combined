@@ -1,0 +1,133 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FusionGVJEPA  ·  torch.profiler run  ·  vjepa-only encoder (1024-d)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Self-contained sibling of overfit_from_vljepa_ckpt.yaml, used ONLY by
+# fusion_gv/trainbatch/profile_gvjepa.sbatch (CONFIG=... override). Same
+# fusion/model/data/init_vljepa_ckpt as that file, but its OWN
+# train.output_dir and its OWN vsi_inference.output_dir -- deliberately NOT
+# shared with overfit_from_vljepa_ckpt.yaml's, so a profiling run's
+# profiler_trace/ never mixes with the plain overfit sanity check's.
+#
+# Run:
+#   CONFIG=fusion_gv/configs/profile_gvjepa_vjepa.yaml sbatch fusion_gv/trainbatch/profile_gvjepa.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ./ckpts/open_vljepa/best.pt
+
+
+# ── Frozen V-JEPA visual encoder ─────────────────────────────────────────────
+fusion:
+  x_encoder_type: vjepa
+  x_encoder_output_dim: null
+
+  vggt_ckpt: ./ckpts/vggt.pt
+  jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
+
+  vggt_img_size:       518
+  vggt_patch_size:     14
+  vggt_embed_dim:      1024
+  vggt_out_dim:        2048
+  vggt_num_patches:    1369
+  jepa_img_size:       384
+  jepa_patch_size:     16
+  jepa_embed_dim:      1024
+  jepa_num_patches:    576
+  proj_dim: 1024
+
+
+# ── Predictor + projection heads ──────────────────────────────────────────────
+model:
+  predictor_hidden_size: 1024
+  predictor_layers:      8
+  predictor_heads:       16
+  predictor_ffn_mult:    4
+  predictor_dropout:     0.1
+
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens:  256
+
+  y_encoder_name:    google/embeddinggemma-300m
+  max_target_tokens: 256
+
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+
+  hf_cache_dir: ./ckpts
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+data:
+  train_manifests:
+    - ./data/spar_sftqa_sftvljepa_uni8.jsonl
+  num_frames: 8
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+train:
+  seed:    42
+  device:  cuda
+  precision: bf16
+
+  # Own dir -- distinct from both the real run (./outputs/sft_from_vljepa_ckpt)
+  # and the plain overfit sanity check (./outputs/sft_from_vljepa_ckpt_overfit).
+  output_dir: ./outputs/profile_gvjepa_vjepa
+
+  # profile_gvjepa.sbatch passes --overfit-samples 32 unconditionally (matches
+  # the fusiongv config's real batch_size, not this one's 128) -- the frozen
+  # batch size for --overfit comes from that CLI flag, not this field, so
+  # this just means the profiled batch is smaller than the real run's here.
+  # Fine for profiling relative kernel/op proportions; not 1:1 with the real
+  # run's memory footprint for this specific config.
+  batch_size: 128
+  gradient_accumulation_steps: 1
+  max_steps: 200
+  clip_grad_norm: 1.0
+  log_every: 10
+  save_every: 0
+
+  learning_rate: 1.0e-5
+  min_lr:        1.0e-6
+  weight_decay:  0.01
+  adam_beta1:    0.9
+  adam_beta2:    0.95
+  adam_eps:      1.0e-8
+
+  scheduler:   cosine
+  temperature: 0.07
+
+
+# ── Inference: VSI-Bench ──────────────────────────────────────────────────────
+vsi_inference:
+  manifest: ./data/vsibench_manifest.jsonl
+  output_dir: ./outputs/inference/profile_gvjepa_vjepa/vsibench
+  checkpoint: null   # -> train.output_dir above -> final.pt
+  mode: auto
+  save_grounding: false
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── Inference: MMSI-Bench ─────────────────────────────────────────────────────
+mmsi_inference:
+  manifest: ./data/mmsibench_manifest.jsonl
+  output_dir: ./outputs/inference/profile_gvjepa_vjepa/mmsibench
+  checkpoint: null
+  mode: auto
+  save_grounding: false
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
+mlflow:
+  enabled: false
