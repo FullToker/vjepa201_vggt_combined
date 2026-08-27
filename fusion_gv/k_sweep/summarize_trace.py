@@ -31,6 +31,14 @@ _OCCUPANCY_KEYS = (
 )
 _MEM_TOTAL_KEYS = ("Total Allocated", "Total Reserved", "Bytes")
 
+# torch.profiler.record_function(...) labels added in fusion_gv/gvjepa.py's
+# _pool_visual/_run_predictor -- summed regardless of `cat`, so we can see
+# how much of the step is x_encoder (frozen VGGT/JEPA, K-independent) vs
+# visual_resampler/predictor_forward (the K-dependent parts), isolated from
+# each other. This is the number that actually answers "what does K cost",
+# not the aggregate kernel totals (those are dominated by x_encoder).
+_LABELED_REGIONS = ("x_encoder", "visual_resampler", "predictor_forward")
+
 
 def _load_events(trace_file: Path) -> list[dict]:
     opener = gzip.open if trace_file.suffix == ".gz" else open
@@ -67,8 +75,15 @@ def summarize(trace_file: Path, top_n: int = 10) -> dict:
 
     kernels: dict[str, dict] = {}
     peak_mem_bytes = 0.0
+    labeled_us = {name: 0.0 for name in _LABELED_REGIONS}
+    labeled_n = {name: 0 for name in _LABELED_REGIONS}
 
     for e in events:
+        name0 = e.get("name")
+        if name0 in _LABELED_REGIONS:
+            labeled_us[name0] += e.get("dur", 0) or 0
+            labeled_n[name0] += 1
+
         cat = (e.get("cat") or "").lower()
         if "kernel" in cat:
             name = e.get("name", "?")
@@ -106,7 +121,14 @@ def summarize(trace_file: Path, top_n: int = 10) -> dict:
         "top_kernel_time_us": top["dur"] if top else None,
         "top_kernel_occupancy_pct": top_occ,
         "avg_occupancy_pct_weighted": avg_occupancy_pct,
-        "peak_memory_gb": (peak_mem_bytes / 1e9) if peak_mem_bytes else None,
+        # From torch.cuda.max_memory_allocated(), written by gvjepa_trainer.py
+        # to <output_dir>/peak_memory.json -- more reliable than this field,
+        # which is a best-effort raw-JSON guess (see _MEM_TOTAL_KEYS above).
+        # run_sweep.py prefers peak_memory.json and only falls back to this.
+        "peak_memory_gb_from_trace_guess": (peak_mem_bytes / 1e9) if peak_mem_bytes else None,
+        "x_encoder_time_us": labeled_us["x_encoder"] or None,
+        "visual_resampler_time_us": labeled_us["visual_resampler"] or None,
+        "predictor_forward_time_us": labeled_us["predictor_forward"] or None,
     }
 
 

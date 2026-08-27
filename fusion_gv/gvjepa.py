@@ -417,10 +417,12 @@ class FusionGVJEPA(nn.Module):
                                         (frame0_tok0..K-1, frame1_tok0..K-1, ...)
             spatial: (B, S, P, D_f)    raw patch features before pooling
         """
-        feat = self.x_encoder(images_vggt, images_jepa, batch_size)   # (B, S, P, D_f)
+        with torch.profiler.record_function("x_encoder"):
+            feat = self.x_encoder(images_vggt, images_jepa, batch_size)   # (B, S, P, D_f)
         B, S, P, D_f = feat.shape
-        pooled = self.visual_resampler(feat.reshape(B * S, P, D_f))   # (B*S, K, D_f)
-        pooled = pooled.reshape(B, S * self.visual_resampler.k, D_f)  # frame-major
+        with torch.profiler.record_function("visual_resampler"):
+            pooled = self.visual_resampler(feat.reshape(B * S, P, D_f))   # (B*S, K, D_f)
+            pooled = pooled.reshape(B, S * self.visual_resampler.k, D_f)  # frame-major
         return pooled, feat                                 # (B,S*K,D_f), (B,S,P,D_f)
 
     def _tokenize(self, tokenizer, texts: list[str], max_length: int, device: torch.device):
@@ -497,14 +499,15 @@ class FusionGVJEPA(nn.Module):
         vis_mask = torch.ones(B, S, device=device, dtype=q_mask.dtype)
         full_mask = torch.cat([vis_mask, q_mask], dim=1)                # (B, S+L), 1=valid
 
-        if self._use_llama_predictor:
-            position_ids = torch.cat([
-                torch.zeros(S, dtype=torch.long, device=device),
-                torch.arange(1, L + 1, dtype=torch.long, device=device),
-            ])
-            x = self.predictor(x, position_ids=position_ids, attention_mask=full_mask)
-        else:
-            x = self.predictor(x, src_key_padding_mask=(full_mask == 0))    # (B, S+L, h)
+        with torch.profiler.record_function("predictor_forward"):
+            if self._use_llama_predictor:
+                position_ids = torch.cat([
+                    torch.zeros(S, dtype=torch.long, device=device),
+                    torch.arange(1, L + 1, dtype=torch.long, device=device),
+                ])
+                x = self.predictor(x, position_ids=position_ids, attention_mask=full_mask)
+            else:
+                x = self.predictor(x, src_key_padding_mask=(full_mask == 0))    # (B, S+L, h)
 
         x_vis = x[:, :S, :]                                             # (B, S, h)
 

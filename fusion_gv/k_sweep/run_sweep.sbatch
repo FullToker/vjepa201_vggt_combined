@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=150G
-#SBATCH --time=04:00:00
+#SBATCH --time=1-00:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/k_sweep/%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/k_sweep/%j.err
 

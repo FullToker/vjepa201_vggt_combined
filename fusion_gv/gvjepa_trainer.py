@@ -527,6 +527,8 @@ class GVJEPATrainer:
             self.profile and is_main, self.output_dir / "profiler_trace", active_steps=self.profile_steps
         )
         prof = prof_cm.__enter__()
+        if self.profile and is_main and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.accelerator.device)
 
         while step < self.max_steps:
             use_grounding = (
@@ -643,6 +645,11 @@ class GVJEPATrainer:
                 break
 
         prof_cm.__exit__(None, None, None)
+
+        if self.profile and is_main and torch.cuda.is_available():
+            peak_gb = torch.cuda.max_memory_allocated(self.accelerator.device) / 1e9
+            with open(self.output_dir / "peak_memory.json", "w") as f:
+                json.dump({"peak_memory_gb": peak_gb}, f)
 
         if is_main:
             final_ckpt = self._save_ckpt(step, filename="final.pt")
