@@ -90,9 +90,15 @@ train:
   # ./outputs/sft_from_vljepa_ckpt_fusiongv (K=1/mean-pool run).
   output_dir: ./outputs/sft_from_vljepa_ckpt_fusiongv_k128
 
-  batch_size:                   32
-  gradient_accumulation_steps:  4
-  # effective batch = batch_size(32) * accum(4) * 3 GPUs = 384.
+  # batch_size halved / accum doubled vs sft_from_vljepa_ckpt_fusiongv.yaml
+  # (32/4) -- K=128 sits right at the single-GPU memory ceiling (80.4GB
+  # profiled, A100 usable capacity 79.15GB) with ~0 margin; real 3-GPU DDP
+  # training adds its own overhead (output-tensor clone in _DDPSink, gradient
+  # bucketing) on top of that per-GPU, which OOM'd by <1GB. Same effective
+  # batch (16*8*3=384), so max_steps/LR/training dynamics are unchanged.
+  batch_size:                   16
+  gradient_accumulation_steps:  8
+  # effective batch = batch_size(16) * accum(8) * 3 GPUs = 384.
   # 3 epochs over spar_sftqa_sftvljepa_uni8.jsonl (1,771,283 rows):
   #   ceil(3 * 1,771,283 / 384) = 13,839
   max_steps: 13839
