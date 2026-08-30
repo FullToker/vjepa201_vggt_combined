@@ -276,15 +276,22 @@ class FusionGVJEPA(nn.Module):
         # ── X-encoder (visual) ───────────────────────────────────────────────
         self.x_encoder = build_x_encoder(config.fusion)
 
-        # ── Visual resampler (replaces spatial mean-pool) ─────────────────────
-        self.visual_resampler = VisualResampler(
-            dim=D_fused,
-            k=config.visual_pool_k,
-            num_layers=config.visual_pool_layers,
-            num_heads=config.visual_pool_heads,
-            ffn_mult=config.visual_pool_ffn_mult,
-            dropout=config.visual_pool_dropout,
-        )
+        # ── Visual pooling ───────────────────────────────────────────────────
+        # k == 1 -> pure spatial mean-pool, zero params. This is the original
+        # (pre-VisualResampler) behaviour, kept so mean-pool checkpoints trained
+        # before commit 89714e7 still load strict=True. k > 1 -> learnable
+        # Perceiver-style resampler.
+        if config.visual_pool_k > 1:
+            self.visual_resampler: VisualResampler | None = VisualResampler(
+                dim=D_fused,
+                k=config.visual_pool_k,
+                num_layers=config.visual_pool_layers,
+                num_heads=config.visual_pool_heads,
+                ffn_mult=config.visual_pool_ffn_mult,
+                dropout=config.visual_pool_dropout,
+            )
+        else:
+            self.visual_resampler = None
 
         # ── Predictor + query tokenizer ───────────────────────────────────────
         self._use_llama_predictor = config.query_model_name != "toy"
@@ -421,8 +428,11 @@ class FusionGVJEPA(nn.Module):
             feat = self.x_encoder(images_vggt, images_jepa, batch_size)   # (B, S, P, D_f)
         B, S, P, D_f = feat.shape
         with torch.profiler.record_function("visual_resampler"):
-            pooled = self.visual_resampler(feat.reshape(B * S, P, D_f))   # (B*S, K, D_f)
-            pooled = pooled.reshape(B, S * self.visual_resampler.k, D_f)  # frame-major
+            if self.visual_resampler is None:
+                pooled = feat.mean(dim=2)                                     # (B, S, D_f)  K=1 mean-pool
+            else:
+                pooled = self.visual_resampler(feat.reshape(B * S, P, D_f))   # (B*S, K, D_f)
+                pooled = pooled.reshape(B, S * self.visual_resampler.k, D_f)  # frame-major
         return pooled, feat                                 # (B,S*K,D_f), (B,S,P,D_f)
 
     def _tokenize(self, tokenizer, texts: list[str], max_length: int, device: torch.device):
