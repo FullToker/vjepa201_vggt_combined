@@ -112,6 +112,11 @@ def main() -> None:
         "--output-dir", type=str, default=None,
         help="Override train.output_dir from the YAML config",
     )
+    parser.add_argument(
+        "--query-self-attn-layers", type=int, default=None,
+        help="Override model.query_self_attn_layers (causal query pre-encoder "
+             "layers, llama path only) from the YAML config",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -124,6 +129,8 @@ def main() -> None:
         cfg["fusion"]["x_encoder_output_dim"] = args.x_encoder_output_dim
     if args.visual_pool_k is not None:
         cfg.setdefault("model", {})["visual_pool_k"] = args.visual_pool_k
+    if args.query_self_attn_layers is not None:
+        cfg.setdefault("model", {})["query_self_attn_layers"] = args.query_self_attn_layers
     if args.output_dir is not None:
         cfg["train"]["output_dir"] = args.output_dir
 

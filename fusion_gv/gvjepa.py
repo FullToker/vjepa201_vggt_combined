@@ -15,6 +15,9 @@ Architecture (paper: arXiv 2512.10942v2)
           row repeated across a frame's K tokens; no order/distance)
 
     query_in_proj(embed_tokens(query_ids))  → (B, L, D_pred)
+        → [optional] causal query pre-encoder: query_self_attn_layers INITIAL
+          Llama layers (otherwise-discarded, disjoint from predictor_llama_layers'
+          tail slice), causal, natural word-order positions. 0 (default) = off.
         + modality_embed[query] (+ query_pos_embed sincos — toy path only;
                                     LlamaPredictor's RoPE covers word order)
 
@@ -41,8 +44,9 @@ Trainable parameters:
     - vis_proj, query_in_proj                (main LR)
     - modality_embed, frame_embed            (main LR)
     - predictor, pred_proj                   (main LR)
-      (LlamaPredictor: only the kept decoder layers + final norm are
-       trainable; its embed_tokens stays frozen)
+      (LlamaPredictor: only the kept decoder layers (query_layers +
+       predictor's own tail layers, when query_self_attn_layers > 0) + final
+       norm are trainable; its embed_tokens stays frozen)
     - y_encoder, y_proj                      (y_encoder_lr_multiplier × main LR)
 
 Frozen parameters:
@@ -223,6 +227,14 @@ class GVJEPAConfig:
     predictor_ffn_mult: int = 4         # toy path only
     predictor_dropout: float = 0.0      # toy path only
     predictor_llama_layers: int = 8     # llama path only
+    # Optional causal query pre-encoder: this many of query_model_name's
+    # INITIAL layers (llama path only), otherwise-unused/discarded, run the
+    # query through self-attention before it's concatenated with visual
+    # tokens -- see fusion_gv/llama_predictor.py's module docstring. 0
+    # (default) = off, current behavior unchanged. Must satisfy
+    # query_self_attn_layers + predictor_llama_layers <= checkpoint's layer
+    # count (LlamaPredictor raises otherwise).
+    query_self_attn_layers: int = 0     # llama path only
 
     # Query encoder (frozen; conditions the predictor). "toy" for offline
     # tests; otherwise a HuggingFace Llama checkpoint name — also used as the
@@ -312,6 +324,7 @@ class FusionGVJEPA(nn.Module):
             self.predictor = LlamaPredictor(
                 llama_name=config.query_model_name,
                 n_keep_layers=config.predictor_llama_layers,
+                n_query_layers=config.query_self_attn_layers,
                 hf_cache_dir=config.hf_cache_dir,
             )
             h = self.predictor.hidden_size   # forced by the checkpoint (2048)
@@ -499,6 +512,13 @@ class FusionGVJEPA(nn.Module):
             q_emb = self.query_encoder.get_input_embeddings()(q_tok["input_ids"])  # (B, L, q_dim)
         q_emb = self.query_in_proj(q_emb)                                      # (B, L, h)
         q_mask = q_tok["attention_mask"]                                        # (B, L)
+
+        # Optional causal query pre-encoder (llama path only, no-op when
+        # query_self_attn_layers=0) — runs BEFORE modality_embed is added, so
+        # these layers see plain query hidden states, same as during their
+        # original Llama pretraining. See llama_predictor.py.
+        if self._use_llama_predictor:
+            q_emb = self.predictor.forward_query(q_emb, q_mask)                # (B, L, h)
 
         L = q_emb.shape[1]
         q_emb = q_emb + self.modality_embed.weight[1]                          # (B,L,h)

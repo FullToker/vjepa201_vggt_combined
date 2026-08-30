@@ -725,6 +725,7 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
         predictor_dropout=m.get("predictor_dropout", 0.0),
         # llama predictor path only (ignored when query_model_name == "toy")
         predictor_llama_layers=m.get("predictor_llama_layers", 8),
+        query_self_attn_layers=m.get("query_self_attn_layers", 0),
         query_model_name=m.get("query_model_name", "toy"),
         max_query_tokens=m.get("max_query_tokens", 64),
         y_encoder_name=m.get("y_encoder_name", "toy"),
