@@ -2,7 +2,6 @@
 #SBATCH --job-name=dl_spar_7m_rgbd
 #SBATCH --partition=data
 #SBATCH --qos=students_opportunistic
-#SBATCH --mem=16G
 #SBATCH --time=24:00:00
 #SBATCH --output=/mnt/home/%u/logs/dl_spar_7m_rgbd_%j.out
 #SBATCH --error=/mnt/home/%u/logs/dl_spar_7m_rgbd_%j.err
