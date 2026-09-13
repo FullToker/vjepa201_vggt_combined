@@ -1,10 +1,11 @@
 """
-Download VGGT and V-JEPA 2.1 checkpoints into ckpts/.
+Download VGGT, V-JEPA 2.1, and I-JEPA checkpoints into ckpts/.
 
 Usage:
     python download_ckpts.py
     python download_ckpts.py --models vggt          # only VGGT
     python download_ckpts.py --models jepa           # only V-JEPA 2.1
+    python download_ckpts.py --models ijepa          # only I-JEPA (x_encoder_type="ijepa" ablation)
 """
 
 import argparse
@@ -23,6 +24,11 @@ MODELS = {
         "url": "https://dl.fbaipublicfiles.com/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt",
         "filename": "vjepa2_1_vitl_dist_vitG_384.pt",
         "description": "V-JEPA 2.1 ViT-L 384 (semantic encoder)",
+    },
+    "ijepa": {
+        "url": "https://dl.fbaipublicfiles.com/ijepa/IN1K-vit.h.14-300e.pth.tar",
+        "filename": "IN1K-vit.h.14-300e.pth.tar",
+        "description": "I-JEPA ViT-H/14 224px (image-pretrained ablation for jepa_encoder)",
     },
 }
 
@@ -117,6 +123,7 @@ def main() -> None:
     print("\nAll checkpoints ready.")
     print(f"  ckpts/vggt.pt                        → VGGT")
     print(f"  ckpts/vjepa2_1_vitl_dist_vitG_384.pt → V-JEPA 2.1 ViT-L")
+    print(f"  ckpts/IN1K-vit.h.14-300e.pth.tar     → I-JEPA ViT-H/14")
 
 
 if __name__ == "__main__":

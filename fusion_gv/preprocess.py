@@ -6,14 +6,19 @@ both encoder inputs in-memory — avoids double disk I/O and double JPEG decode.
 
     raw image
         └── decode once  →  (3, H, W) float32 [0, 1]
-                ├── _to_vggt(t)  →  (3, 518, 518)  — normalisation done inside Aggregator
-                └── _to_jepa(t)  →  (3, 1, 384, 384)  — ImageNet-normalised, T=1
+                ├── _to_vggt(t)   →  (3, 518, 518)     — normalisation done inside Aggregator
+                ├── _to_jepa(t)   →  (3, 1, 384, 384)  — ImageNet-normalised, T=1
+                └── _to_ijepa(t)  →  (3, 224, 224)     — ImageNet-normalised, no T dim
+                                      (need_ijepa=True, off by default — only
+                                      needed for x_encoder_type == "ijepa")
 
 Public API
 ----------
 preprocess(images)  ->  (images_vggt, images_jepa)
-    images_vggt : (1, S, 3, 518, 518)   float32, [0, 1], or None
-    images_jepa : (S,  3, 1, 384, 384)  float32, ImageNet-normalised, or None
+    images_vggt  : (1, S, 3, 518, 518)   float32, [0, 1], or None
+    images_jepa  : (S,  3, 1, 384, 384)  float32, ImageNet-normalised, or None
+    images_ijepa : (S,  3, 224, 224)     float32, ImageNet-normalised, or None
+                    (only when need_ijepa=True; 3rd return value otherwise omitted)
 """
 
 from typing import List, Union
@@ -23,8 +28,9 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from PIL import Image
 
-_VGGT_SIZE = 518   # must be divisible by 14
-_JEPA_SIZE = 384   # must be divisible by 16
+_VGGT_SIZE = 518    # must be divisible by 14
+_JEPA_SIZE = 384    # must be divisible by 16
+_IJEPA_SIZE = 224   # must be divisible by 14 (I-JEPA ViT-H/14)
 
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 _IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
@@ -85,6 +91,21 @@ def _to_jepa(t: torch.Tensor) -> torch.Tensor:
     return t.unsqueeze(1)                  # (3, 1, 384, 384)  ← T=1
 
 
+def _to_ijepa(t: torch.Tensor) -> torch.Tensor:
+    """
+    (3, H, W) [0,1]  →  (3, 224, 224) ImageNet-normalised
+    Bilinear resize to short-side=224, centre-crop. No T dim -- I-JEPA's
+    VisionTransformer takes plain (B, 3, H, W) image input.
+    """
+    _, h, w = t.shape
+    scale = _IJEPA_SIZE / min(h, w)
+    new_h, new_w = int(h * scale), int(w * scale)
+    t = F.interpolate(t.unsqueeze(0), size=(new_h, new_w),
+                      mode="bilinear", align_corners=False).squeeze(0)
+    t = TF.center_crop(t, _IJEPA_SIZE)     # (3, 224, 224)
+    return (t - _IMAGENET_MEAN) / _IMAGENET_STD
+
+
 # ── public API ─────────────────────────────────────────────────────────────────
 
 def preprocess(
@@ -92,7 +113,8 @@ def preprocess(
     *,
     need_vggt: bool = True,
     need_jepa: bool = True,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    need_ijepa: bool = False,
+) -> tuple:
     """
     Decode each image once and derive requested encoder inputs in-memory.
 
@@ -100,24 +122,34 @@ def preprocess(
         images: list of S file paths or PIL Images
         need_vggt: build the VGGT input tensor
         need_jepa: build the V-JEPA input tensor
+        need_ijepa: build the I-JEPA input tensor (x_encoder_type == "ijepa"
+            ablation only -- off by default, adds a 3rd return value when set)
 
     Returns:
-        images_vggt : (1, S, 3, 518, 518)  float32, [0, 1], or None
-        images_jepa : (S,  3, 1, 384, 384) float32, ImageNet-normalised, or None
+        images_vggt  : (1, S, 3, 518, 518)  float32, [0, 1], or None
+        images_jepa  : (S,  3, 1, 384, 384) float32, ImageNet-normalised, or None
+        images_ijepa : (S,  3, 224, 224)    float32, ImageNet-normalised, or None
+                        -- omitted from the return tuple unless need_ijepa=True
     """
-    if not need_vggt and not need_jepa:
-        raise ValueError("At least one of need_vggt or need_jepa must be true.")
+    if not need_vggt and not need_jepa and not need_ijepa:
+        raise ValueError("At least one of need_vggt, need_jepa, need_ijepa must be true.")
 
-    vggt_frames, jepa_frames = [], []
+    vggt_frames, jepa_frames, ijepa_frames = [], [], []
 
     for src in images:
         raw = _decode(src)              # (3, H, W)  - one decode per image
         if need_vggt:
-            vggt_frames.append(_to_vggt(raw))   # (3, 518, 518)
+            vggt_frames.append(_to_vggt(raw))    # (3, 518, 518)
         if need_jepa:
-            jepa_frames.append(_to_jepa(raw))   # (3, 1, 384, 384)
+            jepa_frames.append(_to_jepa(raw))    # (3, 1, 384, 384)
+        if need_ijepa:
+            ijepa_frames.append(_to_ijepa(raw))  # (3, 224, 224)
 
     images_vggt = torch.stack(vggt_frames).unsqueeze(0) if need_vggt else None
     images_jepa = torch.stack(jepa_frames) if need_jepa else None
 
-    return images_vggt, images_jepa
+    if not need_ijepa:
+        return images_vggt, images_jepa
+
+    images_ijepa = torch.stack(ijepa_frames)
+    return images_vggt, images_jepa, images_ijepa

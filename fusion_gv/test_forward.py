@@ -50,6 +50,7 @@ def _test_encoder_dim_config():
     FusionConfig = __import__("fusion_gv.config", fromlist=["FusionConfig"]).FusionConfig
     assert FusionConfig(x_encoder_type="fusion_gv").visual_dim == 2048
     assert FusionConfig(x_encoder_type="vjepa").visual_dim == 1024
+    assert FusionConfig(x_encoder_type="ijepa").visual_dim == 1280
     assert FusionConfig(x_encoder_type="vjepa", x_encoder_output_dim=768).visual_dim == 768
 
 check("FusionConfig x_encoder_type / x_encoder_output_dim", _test_encoder_dim_config)
@@ -182,6 +183,56 @@ else:
         print(f"         output shape     : {r5}")
     if r6:
         print(f"         pred embedding   : {r6}")
+
+
+# ── Phase 6: I-JEPA-only X-encoder forward ───────────────────────────────────
+print("\n=== Phase 6: I-JEPA-only X-encoder forward (requires I-JEPA ckpt) ===")
+
+ijepa_ckpt = os.path.join(ROOT, "ckpts", "IN1K-vit.h.14-300e.pth.tar")
+
+if not os.path.exists(ijepa_ckpt):
+    print(f"  [{SKIP}] checkpoint not found: ckpts/IN1K-vit.h.14-300e.pth.tar")
+    print(f"           run: python download_ckpts.py --models ijepa")
+else:
+    from fusion_gv.model import IJEPAOnlyXEncoder
+    from fusion_gv.gvjepa import FusionGVJEPA, GVJEPAConfig
+
+    def _test_ijepa_only_xencoder():
+        cfg = FusionConfig(x_encoder_type="ijepa")
+        model = IJEPAOnlyXEncoder(cfg).eval()
+        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
+        vggt_t, _, ijepa_t = preprocess(imgs, need_ijepa=True)
+        with torch.no_grad():
+            out = model(vggt_t, ijepa_t)
+        assert out.shape == (1, S, 256, 1280), out.shape
+        return out.shape
+
+    def _test_gvjepa_with_ijepa_xencoder():
+        fusion_cfg = FusionConfig(x_encoder_type="ijepa")
+        model_cfg = GVJEPAConfig(
+            fusion=fusion_cfg,
+            predictor_hidden_size=128,
+            predictor_layers=1,
+            predictor_heads=4,
+            shared_embed_dim=64,
+            query_model_name="toy",
+            y_encoder_name="toy",
+        )
+        model = FusionGVJEPA(model_cfg).eval()
+        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
+        vggt_t, _, ijepa_t = preprocess(imgs, need_ijepa=True)
+        with torch.no_grad():
+            out = model(vggt_t, ijepa_t, queries=["describe scene"], targets=["a scene"])
+        assert out["pred"].shape == (1, 64), out["pred"].shape
+        assert out["target"].shape == (1, 64), out["target"].shape
+        return out["pred"].shape
+
+    r7 = check("IJEPAOnlyXEncoder forward → (B,S,256,1280)", _test_ijepa_only_xencoder)
+    r8 = check("FusionGVJEPA x_encoder_type='ijepa' forward", _test_gvjepa_with_ijepa_xencoder)
+    if r7:
+        print(f"         output shape     : {r7}")
+    if r8:
+        print(f"         pred embedding   : {r8}")
 
 
 print("\n=== done ===\n")
