@@ -25,6 +25,11 @@ MODELS = {
         "filename": "vjepa2_1_vitl_dist_vitG_384.pt",
         "description": "V-JEPA 2.1 ViT-L 384 (semantic encoder)",
     },
+    "ijepa": {
+        "url": "https://dl.fbaipublicfiles.com/ijepa/IN1K-vit.h.14-300e.pth.tar",
+        "filename": "IN1K-vit.h.14-300e.pth.tar",
+        "description": "I-JEPA ViT-H/14 224px (image-pretrained ablation for jepa_encoder)",
+    },
 }
 
 # I-JEPA (x_encoder_type="ijepa" ablation, optional) is not part of this
