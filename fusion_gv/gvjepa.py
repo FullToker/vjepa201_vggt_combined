@@ -50,7 +50,7 @@ Trainable parameters:
     - y_encoder, y_proj                      (y_encoder_lr_multiplier × main LR)
 
 Frozen parameters:
-    - FrozenVGGT, FrozenJEPA (inside FusionGV)
+    - FrozenVGGT, FrozenSemanticEncoder (inside FusionGV)
     - query_encoder (toy path) / predictor.embed_tokens (llama path)
 
 Usage

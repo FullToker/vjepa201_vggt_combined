@@ -5,9 +5,9 @@ def __getattr__(name):
     if name == "FusionGV":
         from fusion_gv.model import FusionGV
         return FusionGV
-    if name == "VJEPAOnlyXEncoder":
-        from fusion_gv.model import VJEPAOnlyXEncoder
-        return VJEPAOnlyXEncoder
+    if name == "SingleEncoderXEncoder":
+        from fusion_gv.model import SingleEncoderXEncoder
+        return SingleEncoderXEncoder
     if name == "build_x_encoder":
         from fusion_gv.model import build_x_encoder
         return build_x_encoder
@@ -21,7 +21,7 @@ def __getattr__(name):
 
 __all__ = [
     "FusionGV",
-    "VJEPAOnlyXEncoder",
+    "SingleEncoderXEncoder",
     "build_x_encoder",
     "FusionConfig",
     "preprocess",

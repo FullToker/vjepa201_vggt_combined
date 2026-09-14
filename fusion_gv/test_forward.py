@@ -137,28 +137,35 @@ else:
         print(f"         output shape : {r3}")
 
 
-# ── Phase 5: V-JEPA-only X-encoder forward ───────────────────────────────────
-print("\n=== Phase 5: V-JEPA-only X-encoder forward (requires V-JEPA ckpt) ===")
+# ── Phase 5: single-semantic-encoder X-encoder forward (registry-driven) ─────
+# Loops over every encoder_registry.SEMANTIC_ENCODERS entry -- adding a new
+# spec there gets it covered here automatically, no new test block needed.
+print("\n=== Phase 5: single-semantic-encoder X-encoder forward (registry-driven) ===")
 
-if not os.path.exists(jepa_ckpt):
-    print(f"  [{SKIP}] checkpoint not found: ckpts/vjepa2_1_vitl_dist_vitG_384.pt")
-    print(f"           run: python download_ckpts.py")
-else:
-    from fusion_gv.model import VJEPAOnlyXEncoder
-    from fusion_gv.gvjepa import FusionGVJEPA, GVJEPAConfig
+from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
+from fusion_gv.model import SingleEncoderXEncoder
+from fusion_gv.gvjepa import FusionGVJEPA, GVJEPAConfig
 
-    def _test_vjepa_only_xencoder():
-        cfg = FusionConfig(x_encoder_type="vjepa")
-        model = VJEPAOnlyXEncoder(cfg).eval()
+for enc_name, spec in SEMANTIC_ENCODERS.items():
+    print(f"--- {enc_name} ---")
+    if not os.path.exists(spec.default_ckpt):
+        print(f"  [{SKIP}] checkpoint not found: {spec.default_ckpt}")
+        continue
+
+    def _test_single_encoder_xencoder(enc_name=enc_name, spec=spec):
+        cfg = FusionConfig(x_encoder_type=enc_name)
+        model = SingleEncoderXEncoder(cfg).eval()
         imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
-        vggt_t, jepa_t = preprocess(imgs)
+        vggt_t, _, sem_t = preprocess(
+            imgs, semantic_img_size=spec.img_size, semantic_add_t_dim=spec.add_temporal_dim
+        )
         with torch.no_grad():
-            out = model(vggt_t, jepa_t)
-        assert out.shape == (1, S, 576, 1024), out.shape
+            out = model(vggt_t, sem_t)
+        assert out.shape == (1, S, spec.num_patches, spec.embed_dim), out.shape
         return out.shape
 
-    def _test_gvjepa_with_vjepa_xencoder():
-        fusion_cfg = FusionConfig(x_encoder_type="vjepa")
+    def _test_gvjepa_with_single_encoder(enc_name=enc_name, spec=spec):
+        fusion_cfg = FusionConfig(x_encoder_type=enc_name)
         model_cfg = GVJEPAConfig(
             fusion=fusion_cfg,
             predictor_hidden_size=128,
@@ -170,69 +177,24 @@ else:
         )
         model = FusionGVJEPA(model_cfg).eval()
         imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
-        vggt_t, jepa_t = preprocess(imgs)
-        with torch.no_grad():
-            out = model(vggt_t, jepa_t, queries=["describe scene"], targets=["a scene"])
-        assert out["pred"].shape == (1, 64), out["pred"].shape
-        assert out["target"].shape == (1, 64), out["target"].shape
-        return out["pred"].shape
-
-    r5 = check("VJEPAOnlyXEncoder forward → (B,S,576,1024)", _test_vjepa_only_xencoder)
-    r6 = check("FusionGVJEPA x_encoder_type='vjepa' forward", _test_gvjepa_with_vjepa_xencoder)
-    if r5:
-        print(f"         output shape     : {r5}")
-    if r6:
-        print(f"         pred embedding   : {r6}")
-
-
-# ── Phase 6: I-JEPA-only X-encoder forward ───────────────────────────────────
-print("\n=== Phase 6: I-JEPA-only X-encoder forward (requires I-JEPA ckpt) ===")
-
-ijepa_ckpt = os.path.join(ROOT, "ckpts", "IN1K-vit.h.14-300e.pth.tar")
-
-if not os.path.exists(ijepa_ckpt):
-    print(f"  [{SKIP}] checkpoint not found: ckpts/IN1K-vit.h.14-300e.pth.tar")
-    print(f"           run: python download_ckpts.py --models ijepa")
-else:
-    from fusion_gv.model import IJEPAOnlyXEncoder
-    from fusion_gv.gvjepa import FusionGVJEPA, GVJEPAConfig
-
-    def _test_ijepa_only_xencoder():
-        cfg = FusionConfig(x_encoder_type="ijepa")
-        model = IJEPAOnlyXEncoder(cfg).eval()
-        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
-        vggt_t, _, ijepa_t = preprocess(imgs, need_ijepa=True)
-        with torch.no_grad():
-            out = model(vggt_t, ijepa_t)
-        assert out.shape == (1, S, 256, 1280), out.shape
-        return out.shape
-
-    def _test_gvjepa_with_ijepa_xencoder():
-        fusion_cfg = FusionConfig(x_encoder_type="ijepa")
-        model_cfg = GVJEPAConfig(
-            fusion=fusion_cfg,
-            predictor_hidden_size=128,
-            predictor_layers=1,
-            predictor_heads=4,
-            shared_embed_dim=64,
-            query_model_name="toy",
-            y_encoder_name="toy",
+        vggt_t, _, sem_t = preprocess(
+            imgs, semantic_img_size=spec.img_size, semantic_add_t_dim=spec.add_temporal_dim
         )
-        model = FusionGVJEPA(model_cfg).eval()
-        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
-        vggt_t, _, ijepa_t = preprocess(imgs, need_ijepa=True)
         with torch.no_grad():
-            out = model(vggt_t, ijepa_t, queries=["describe scene"], targets=["a scene"])
+            out = model(vggt_t, sem_t, queries=["describe scene"], targets=["a scene"])
         assert out["pred"].shape == (1, 64), out["pred"].shape
         assert out["target"].shape == (1, 64), out["target"].shape
         return out["pred"].shape
 
-    r7 = check("IJEPAOnlyXEncoder forward → (B,S,256,1280)", _test_ijepa_only_xencoder)
-    r8 = check("FusionGVJEPA x_encoder_type='ijepa' forward", _test_gvjepa_with_ijepa_xencoder)
-    if r7:
-        print(f"         output shape     : {r7}")
-    if r8:
-        print(f"         pred embedding   : {r8}")
+    r_enc = check(
+        f"SingleEncoderXEncoder('{enc_name}') forward → (B,S,{spec.num_patches},{spec.embed_dim})",
+        _test_single_encoder_xencoder,
+    )
+    r_gvjepa = check(f"FusionGVJEPA x_encoder_type='{enc_name}' forward", _test_gvjepa_with_single_encoder)
+    if r_enc:
+        print(f"         output shape     : {r_enc}")
+    if r_gvjepa:
+        print(f"         pred embedding   : {r_gvjepa}")
 
 
 print("\n=== done ===\n")

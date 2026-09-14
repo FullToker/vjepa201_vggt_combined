@@ -36,6 +36,7 @@ import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
 from fusion_gv.gvjepa_trainer import build_model_from_config
 from fusion_gv.preprocess import preprocess
 
@@ -170,21 +171,26 @@ class _InferenceDataset(Dataset):
         rows: List[Dict[str, Any]],
         input_root: str | Path | None,
         need_vggt: bool,
+        x_encoder_type: str = "fusion_gv",
     ) -> None:
         self.rows = rows
         self.input_root = input_root
         self.need_vggt = need_vggt
+        self.spec = None if x_encoder_type == "fusion_gv" else SEMANTIC_ENCODERS[x_encoder_type]
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self.rows[idx]
-        imgs_v, imgs_j = preprocess(
-            _image_paths(row, self.input_root),
-            need_vggt=self.need_vggt,
-            need_jepa=True,
-        )
+        paths = _image_paths(row, self.input_root)
+        if self.spec is None:
+            imgs_v, imgs_j = preprocess(paths, need_vggt=self.need_vggt, need_jepa=True)
+        else:
+            imgs_v, _, imgs_j = preprocess(
+                paths, need_vggt=self.need_vggt, need_jepa=False,
+                semantic_img_size=self.spec.img_size, semantic_add_t_dim=self.spec.add_temporal_dim,
+            )
         return {
             "row": row,
             "images_vggt": imgs_v,
@@ -291,7 +297,9 @@ def main() -> None:
     parser.add_argument("--no-pin-memory", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "bf16", "fp16"), default=None)
     parser.add_argument("--mode", choices=("auto", "embedding", "select", "multichoices"), default=None)
-    parser.add_argument("--x-encoder-type", choices=("fusion_gv", "vjepa"), default=None)
+    parser.add_argument(
+        "--x-encoder-type", choices=("fusion_gv",) + tuple(SEMANTIC_ENCODERS.keys()), default=None
+    )
     parser.add_argument("--x-encoder-output-dim", type=int, default=None)
     parser.add_argument(
         "--metrics-only",
@@ -352,7 +360,7 @@ def main() -> None:
     need_vggt = x_encoder_type == "fusion_gv"
 
     rows = _read_jsonl(input_jsonl)
-    dataset = _InferenceDataset(rows, input_root, need_vggt=need_vggt)
+    dataset = _InferenceDataset(rows, input_root, need_vggt=need_vggt, x_encoder_type=x_encoder_type)
     pin_memory = device.type == "cuda" and not args.no_pin_memory
     loader_kwargs: Dict[str, Any] = {
         "batch_size": batch_size,

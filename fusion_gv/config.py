@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 import os
 from typing import Optional
 
+from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
+
 _ROOT = os.path.dirname(os.path.dirname(__file__))
 
 
@@ -9,11 +11,15 @@ _ROOT = os.path.dirname(os.path.dirname(__file__))
 class FusionConfig:
     # X-encoder mode used by the training stack.
     # "fusion_gv" keeps the current VGGT + V-JEPA concat encoder.
-    # "vjepa" uses V-JEPA alone as the X-encoder.
-    # "ijepa" uses I-JEPA (image-pretrained, no video) alone as the X-encoder
-    #   -- ablation counterpart to "vjepa", isolating video pretraining.
+    # Any other value must be a key in encoder_registry.SEMANTIC_ENCODERS
+    # (currently "vjepa", "ijepa") -- that single semantic encoder alone
+    # becomes the X-encoder, no VGGT. See encoder_registry.py to add one.
     x_encoder_type: str = "fusion_gv"
     x_encoder_output_dim: Optional[int] = None
+    # Overrides encoder_registry.SEMANTIC_ENCODERS[x_encoder_type].default_ckpt
+    # when set. Only consulted for the single-semantic-encoder path (not
+    # "fusion_gv", which always uses jepa_ckpt below for its fixed vjepa stream).
+    x_encoder_ckpt: Optional[str] = None
 
     # ── VGGT (geometric encoder) ───────────────────────────────────────────────
     vggt_img_size: int = 518
@@ -31,12 +37,9 @@ class FusionConfig:
     jepa_num_patches: int = 576             # 24 × 24
     jepa_out_layers: tuple = (5, 11, 17, 23)   # must be subset of hierarchical_layers
 
-    # ── I-JEPA ViT-H/14 (image-pretrained ablation for jepa_encoder) ──────────
-    ijepa_img_size: int = 224
-    ijepa_patch_size: int = 14              # 224 / 14 = 16
-    ijepa_embed_dim: int = 1280
-    ijepa_num_patches: int = 256            # 16 × 16
-    ijepa_out_layers: tuple = (7, 15, 23, 31)
+    # Other single-semantic-encoder ablations (x_encoder_type="ijepa", ...)
+    # get their img_size/patch_size/embed_dim/num_patches/out_layers from
+    # encoder_registry.SEMANTIC_ENCODERS -- no per-encoder fields needed here.
 
     # ── Fusion module ──────────────────────────────────────────────────────────
     # SingleLevelFusion: per-stream LayerNorm + 2-layer MLP(GELU) projector,
@@ -58,13 +61,11 @@ class FusionConfig:
             return self.x_encoder_output_dim
         if self.x_encoder_type == "fusion_gv":
             return self.proj_dim * 2
-        if self.x_encoder_type == "vjepa":
-            return self.jepa_embed_dim
-        if self.x_encoder_type == "ijepa":
-            return self.ijepa_embed_dim
+        if self.x_encoder_type in SEMANTIC_ENCODERS:
+            return SEMANTIC_ENCODERS[self.x_encoder_type].embed_dim
         raise ValueError(
             f"Unknown x_encoder_type '{self.x_encoder_type}'. "
-            "Choose 'fusion_gv', 'vjepa', or 'ijepa'."
+            f"Choose 'fusion_gv' or one of {tuple(SEMANTIC_ENCODERS.keys())}."
         )
 
     @property
@@ -72,13 +73,11 @@ class FusionConfig:
         """Spatial token count produced by the configured X-encoder."""
         if self.x_encoder_type == "fusion_gv":
             return self.vggt_num_patches
-        if self.x_encoder_type == "vjepa":
-            return self.jepa_num_patches
-        if self.x_encoder_type == "ijepa":
-            return self.ijepa_num_patches
+        if self.x_encoder_type in SEMANTIC_ENCODERS:
+            return SEMANTIC_ENCODERS[self.x_encoder_type].num_patches
         raise ValueError(
             f"Unknown x_encoder_type '{self.x_encoder_type}'. "
-            "Choose 'fusion_gv', 'vjepa', or 'ijepa'."
+            f"Choose 'fusion_gv' or one of {tuple(SEMANTIC_ENCODERS.keys())}."
         )
 
     # ── Checkpoints ───────────────────────────────────────────────────────────
@@ -88,6 +87,6 @@ class FusionConfig:
             _ROOT, "ckpts", "vjepa2_1_vitl_dist_vitG_384.pt"
         )
     )
-    ijepa_ckpt: str = field(
-        default_factory=lambda: os.path.join(_ROOT, "ckpts", "IN1K-vit.h.14-300e.pth.tar")
-    )
+    # ijepa (and any other registry-driven single-semantic-encoder type)'s
+    # checkpoint comes from encoder_registry's default_ckpt, or x_encoder_ckpt
+    # above to override it -- no dedicated field per encoder.

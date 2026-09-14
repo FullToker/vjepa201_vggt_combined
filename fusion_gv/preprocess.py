@@ -6,19 +6,26 @@ both encoder inputs in-memory — avoids double disk I/O and double JPEG decode.
 
     raw image
         └── decode once  →  (3, H, W) float32 [0, 1]
-                ├── _to_vggt(t)   →  (3, 518, 518)     — normalisation done inside Aggregator
-                ├── _to_jepa(t)   →  (3, 1, 384, 384)  — ImageNet-normalised, T=1
-                └── _to_ijepa(t)  →  (3, 224, 224)     — ImageNet-normalised, no T dim
-                                      (need_ijepa=True, off by default — only
-                                      needed for x_encoder_type == "ijepa")
+                ├── _to_vggt(t)                        →  (3, 518, 518)  — normalisation done inside Aggregator
+                ├── _to_semantic(t, 384, add_t_dim=True) →  (3, 1, 384, 384)  — ImageNet-normalised, T=1
+                │     (need_jepa=True — the fixed V-JEPA shape fusion_gv's FusionGV always needs)
+                └── _to_semantic(t, size, add_t_dim)    →  (3, [1,] size, size) — ImageNet-normalised
+                      (semantic_img_size != None — generic, for whichever single-semantic-encoder
+                      ablation is configured; caller supplies size/add_t_dim from
+                      encoder_registry.SEMANTIC_ENCODERS[x_encoder_type], see gvjepa_collate)
+
+This module never imports encoder_registry (keeps it dependency-light for
+DataLoader workers) — callers resolve img_size/add_t_dim from the registry
+themselves and pass them in.
 
 Public API
 ----------
 preprocess(images)  ->  (images_vggt, images_jepa)
     images_vggt  : (1, S, 3, 518, 518)   float32, [0, 1], or None
     images_jepa  : (S,  3, 1, 384, 384)  float32, ImageNet-normalised, or None
-    images_ijepa : (S,  3, 224, 224)     float32, ImageNet-normalised, or None
-                    (only when need_ijepa=True; 3rd return value otherwise omitted)
+    images_semantic : (S, 3, [1,] size, size) float32, ImageNet-normalised, or None
+                    (only when semantic_img_size is given; 3rd return value
+                    otherwise omitted)
 """
 
 from typing import List, Union
@@ -29,8 +36,7 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 
 _VGGT_SIZE = 518    # must be divisible by 14
-_JEPA_SIZE = 384    # must be divisible by 16
-_IJEPA_SIZE = 224   # must be divisible by 14 (I-JEPA ViT-H/14)
+_JEPA_SIZE = 384    # must be divisible by 16 -- fusion_gv's fixed V-JEPA shape
 
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 _IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
@@ -76,34 +82,23 @@ def _to_vggt(t: torch.Tensor) -> torch.Tensor:
     return TF.center_crop(t, _VGGT_SIZE)   # (3, 518, 518)
 
 
-def _to_jepa(t: torch.Tensor) -> torch.Tensor:
+def _to_semantic(t: torch.Tensor, img_size: int, add_t_dim: bool) -> torch.Tensor:
     """
-    (3, H, W) [0,1]  →  (3, 1, 384, 384) ImageNet-normalised
-    Bilinear resize to short-side=384, centre-crop, add T=1 dim.
+    (3, H, W) [0,1]  →  (3, [1,] img_size, img_size) ImageNet-normalised
+    Bilinear resize to short-side=img_size, centre-crop, ImageNet-normalise.
+    add_t_dim=True appends a T=1 dim (video-mode ViTs, e.g. V-JEPA);
+    add_t_dim=False leaves it as a plain image tensor (e.g. I-JEPA).
+    Generic across every registry.SEMANTIC_ENCODERS entry -- one crop
+    function for all of them, driven by the caller-supplied size/add_t_dim.
     """
     _, h, w = t.shape
-    scale = _JEPA_SIZE / min(h, w)
+    scale = img_size / min(h, w)
     new_h, new_w = int(h * scale), int(w * scale)
     t = F.interpolate(t.unsqueeze(0), size=(new_h, new_w),
                       mode="bilinear", align_corners=False).squeeze(0)
-    t = TF.center_crop(t, _JEPA_SIZE)      # (3, 384, 384)
+    t = TF.center_crop(t, img_size)        # (3, img_size, img_size)
     t = (t - _IMAGENET_MEAN) / _IMAGENET_STD
-    return t.unsqueeze(1)                  # (3, 1, 384, 384)  ← T=1
-
-
-def _to_ijepa(t: torch.Tensor) -> torch.Tensor:
-    """
-    (3, H, W) [0,1]  →  (3, 224, 224) ImageNet-normalised
-    Bilinear resize to short-side=224, centre-crop. No T dim -- I-JEPA's
-    VisionTransformer takes plain (B, 3, H, W) image input.
-    """
-    _, h, w = t.shape
-    scale = _IJEPA_SIZE / min(h, w)
-    new_h, new_w = int(h * scale), int(w * scale)
-    t = F.interpolate(t.unsqueeze(0), size=(new_h, new_w),
-                      mode="bilinear", align_corners=False).squeeze(0)
-    t = TF.center_crop(t, _IJEPA_SIZE)     # (3, 224, 224)
-    return (t - _IMAGENET_MEAN) / _IMAGENET_STD
+    return t.unsqueeze(1) if add_t_dim else t   # (3, 1, size, size) or (3, size, size)
 
 
 # ── public API ─────────────────────────────────────────────────────────────────
@@ -113,7 +108,8 @@ def preprocess(
     *,
     need_vggt: bool = True,
     need_jepa: bool = True,
-    need_ijepa: bool = False,
+    semantic_img_size: int | None = None,
+    semantic_add_t_dim: bool = False,
 ) -> tuple:
     """
     Decode each image once and derive requested encoder inputs in-memory.
@@ -121,35 +117,42 @@ def preprocess(
     Args:
         images: list of S file paths or PIL Images
         need_vggt: build the VGGT input tensor
-        need_jepa: build the V-JEPA input tensor
-        need_ijepa: build the I-JEPA input tensor (x_encoder_type == "ijepa"
-            ablation only -- off by default, adds a 3rd return value when set)
+        need_jepa: build the fixed 384px V-JEPA input tensor (fusion_gv's
+            FusionGV always needs exactly this shape for its semantic stream)
+        semantic_img_size: build a 3rd generic tensor at this size for
+            whichever single-semantic-encoder ablation is configured (see
+            encoder_registry.SEMANTIC_ENCODERS[x_encoder_type].img_size) --
+            None (default) omits the 3rd return value entirely
+        semantic_add_t_dim: whether that 3rd tensor needs a T=1 dim (see
+            encoder_registry.SEMANTIC_ENCODERS[x_encoder_type].add_temporal_dim)
 
     Returns:
-        images_vggt  : (1, S, 3, 518, 518)  float32, [0, 1], or None
-        images_jepa  : (S,  3, 1, 384, 384) float32, ImageNet-normalised, or None
-        images_ijepa : (S,  3, 224, 224)    float32, ImageNet-normalised, or None
-                        -- omitted from the return tuple unless need_ijepa=True
+        images_vggt     : (1, S, 3, 518, 518)  float32, [0, 1], or None
+        images_jepa     : (S,  3, 1, 384, 384) float32, ImageNet-normalised, or None
+        images_semantic : (S, 3, [1,] semantic_img_size, semantic_img_size)
+                          float32, ImageNet-normalised
+                          -- omitted from the return tuple unless semantic_img_size is set
     """
-    if not need_vggt and not need_jepa and not need_ijepa:
-        raise ValueError("At least one of need_vggt, need_jepa, need_ijepa must be true.")
+    need_semantic = semantic_img_size is not None
+    if not need_vggt and not need_jepa and not need_semantic:
+        raise ValueError("At least one of need_vggt, need_jepa, semantic_img_size must be set.")
 
-    vggt_frames, jepa_frames, ijepa_frames = [], [], []
+    vggt_frames, jepa_frames, semantic_frames = [], [], []
 
     for src in images:
         raw = _decode(src)              # (3, H, W)  - one decode per image
         if need_vggt:
             vggt_frames.append(_to_vggt(raw))    # (3, 518, 518)
         if need_jepa:
-            jepa_frames.append(_to_jepa(raw))    # (3, 1, 384, 384)
-        if need_ijepa:
-            ijepa_frames.append(_to_ijepa(raw))  # (3, 224, 224)
+            jepa_frames.append(_to_semantic(raw, _JEPA_SIZE, add_t_dim=True))   # (3, 1, 384, 384)
+        if need_semantic:
+            semantic_frames.append(_to_semantic(raw, semantic_img_size, semantic_add_t_dim))
 
     images_vggt = torch.stack(vggt_frames).unsqueeze(0) if need_vggt else None
     images_jepa = torch.stack(jepa_frames) if need_jepa else None
 
-    if not need_ijepa:
+    if not need_semantic:
         return images_vggt, images_jepa
 
-    images_ijepa = torch.stack(ijepa_frames)
-    return images_vggt, images_jepa, images_ijepa
+    images_semantic = torch.stack(semantic_frames)
+    return images_vggt, images_jepa, images_semantic

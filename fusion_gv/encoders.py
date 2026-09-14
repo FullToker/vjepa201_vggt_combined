@@ -6,20 +6,16 @@ FrozenVGGT
     Output: list of 4 × (B, S, 1369, 2048)
             levels correspond to Aggregator cached rounds {4, 11, 17, 23}
 
-FrozenJEPA
-    Input : (B*S, 3, 1, 384, 384)  float32, ImageNet-normalised
-    Output: list of 4 × (B, S, 576, 1024)
-            levels correspond to ViT-L blocks {5, 11, 17, 23}
+FrozenSemanticEncoder
+    Generic wrapper driven by an encoder_registry.EncoderSpec -- e.g.
+        FrozenSemanticEncoder(SEMANTIC_ENCODERS["vjepa"], ckpt_path)
+        FrozenSemanticEncoder(SEMANTIC_ENCODERS["ijepa"], ckpt_path)
+    Input : (B*S, 3, [1,] spec.img_size, spec.img_size)  float32, ImageNet-normalised
+            (the T=1 dim is present only when spec.add_temporal_dim is True)
+    Output: list of len(spec.out_layers) × (B, S, spec.num_patches, spec.embed_dim)
 
-FrozenIJEPA
-    Input : (B*S, 3, 224, 224)  float32, ImageNet-normalised
-    Output: list of 4 × (B, S, 256, 1280)
-            levels correspond to ViT-H/14 blocks {7, 15, 23, 31}
-
-    Ablation counterpart to FrozenJEPA: same ViT-based JEPA masked-latent
-    method, but pretrained on plain images (IN1K) instead of video -- isolates
-    "video pretraining" as the only varying factor when swapped in via
-    x_encoder_type == "ijepa" (see config.py / model.py).
+    All parameters frozen. See encoder_registry.py to add a new spec instead
+    of adding a new class here.
 """
 
 import sys
@@ -28,14 +24,14 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from fusion_gv.encoder_registry import EncoderSpec
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _LOCAL_VGGT_ROOT = _REPO_ROOT / "vggt"
 if _LOCAL_VGGT_ROOT.exists() and str(_LOCAL_VGGT_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOCAL_VGGT_ROOT))
 
 from vggt.models.vggt import VGGT
-from app.vjepa_2_1.models import vision_transformer as jepa_vit
-from src.models.vision_transformer import vit_huge as ijepa_vit_huge
 
 
 class FrozenVGGT(nn.Module):
@@ -82,50 +78,27 @@ class FrozenVGGT(nn.Module):
         return feats   # list of 4
 
 
-class FrozenJEPA(nn.Module):
+class FrozenSemanticEncoder(nn.Module):
     """
-    Loads V-JEPA 2.1 ViT-L encoder from checkpoint and sets out_layers
-    so forward() returns intermediate features at 4 levels.
-    All parameters are frozen.
-
-    The checkpoint key used is 'ema_encoder' (teacher / EMA weights).
-
-    Output levels (index in output list → ViT-L block):
-        0 → block  5  (early semantics)
-        1 → block 11  (mid-early semantics)
-        2 → block 17  (mid-late semantics)
-        3 → block 23  (final semantics)
+    Generic frozen semantic-encoder wrapper, parameterized by an
+    encoder_registry.EncoderSpec. Replaces what used to be a separate
+    FrozenJEPA / FrozenIJEPA class per encoder -- adding a new encoder means
+    adding a spec to encoder_registry.SEMANTIC_ENCODERS, not a new class here.
     """
 
-    _OUT_LAYERS = [5, 11, 17, 23]   # subset of hierarchical_layers for depth=24
-
-    def __init__(self, ckpt_path: str):
+    def __init__(self, spec: EncoderSpec, ckpt_path: str):
         super().__init__()
-
-        self.encoder = jepa_vit.vit_large(
-            patch_size=16,
-            img_size=(384, 384),
-            num_frames=64,
-            tubelet_size=2,
-            use_sdpa=True,
-            use_SiLU=False,
-            wide_SiLU=True,
-            uniform_power=False,
-            use_rope=True,
-            img_temporal_dim_size=1,    # T=1 → image mode
-            interpolate_rope=True,
-            n_output_distillation=1,
-        )
+        self.spec = spec
+        self.encoder = spec.build_backbone()
 
         state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-        enc_state = {
-            k.replace("module.", "").replace("backbone.", ""): v
-            for k, v in state["ema_encoder"].items()
-        }
+        enc_state = state[spec.ckpt_state_key]
+        for prefix in spec.strip_prefixes:
+            enc_state = {k.replace(prefix, ""): v for k, v in enc_state.items()}
         self.encoder.load_state_dict(enc_state, strict=True)
 
         # activate multi-level output — forward() returns list instead of tensor
-        self.encoder.out_layers = self._OUT_LAYERS
+        self.encoder.out_layers = list(spec.out_layers)
 
         for p in self.parameters():
             p.requires_grad_(False)
@@ -134,71 +107,10 @@ class FrozenJEPA(nn.Module):
     @torch.no_grad()
     def forward(self, images: torch.Tensor, B: int, S: int) -> list[torch.Tensor]:
         """
-        images : (B*S, 3, 1, 384, 384) float32, ImageNet-normalised
+        images : (B*S, 3, [1,] spec.img_size, spec.img_size) float32, ImageNet-normalised
         B, S   : original batch and sequence dimensions
-        returns: list of 4 × (B, S, 576, 1024)
+        returns: list of len(spec.out_layers) × (B, S, spec.num_patches, spec.embed_dim)
         """
-        # encoder returns list of 4 × (B*S, 576, 1024) when out_layers is set
+        # encoder returns list of N × (B*S, num_patches, embed_dim) when out_layers is set
         outs = self.encoder(images)
-        return [o.view(B, S, 576, 1024) for o in outs]
-
-
-class FrozenIJEPA(nn.Module):
-    """
-    Loads an official I-JEPA ViT-H/14 checkpoint (IN1K-vit.h.14-300e.pth.tar)
-    and sets out_layers so forward() returns intermediate features at 4
-    levels. All parameters are frozen.
-
-    The checkpoint key used is 'target_encoder' (EMA / teacher weights) --
-    same convention as FrozenJEPA's 'ema_encoder'. Keys are DDP-wrapped
-    ('module.' prefix), stripped on load.
-
-    Unlike FrozenJEPA, this ViT takes plain (B, 3, 224, 224) image input --
-    src.models.vision_transformer.VisionTransformer.forward handles x.ndim==4
-    natively (no synthetic T=1 dim, no tubelet patch embed, absolute 2D
-    sincos pos-embed instead of RoPE) -- it's the original I-JEPA/ViT
-    architecture, not the video-adapted one used for V-JEPA.
-
-    Output levels (index in output list -> ViT-H block):
-        0 -> block  7  (early semantics)
-        1 -> block 15  (mid-early semantics)
-        2 -> block 23  (mid-late semantics)
-        3 -> block 31  (final semantics, depth=32)
-    """
-
-    _OUT_LAYERS = [7, 15, 23, 31]   # evenly spaced across depth=32, mirrors FrozenJEPA's relative spacing
-
-    def __init__(self, ckpt_path: str):
-        super().__init__()
-
-        self.encoder = ijepa_vit_huge(
-            patch_size=14,
-            img_size=(224, 224),
-            num_frames=1,
-            tubelet_size=1,
-        )
-
-        state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-        enc_state = {
-            k.replace("module.", ""): v
-            for k, v in state["target_encoder"].items()
-        }
-        self.encoder.load_state_dict(enc_state, strict=True)
-
-        # activate multi-level output -- forward() returns list instead of tensor
-        self.encoder.out_layers = self._OUT_LAYERS
-
-        for p in self.parameters():
-            p.requires_grad_(False)
-        self.eval()
-
-    @torch.no_grad()
-    def forward(self, images: torch.Tensor, B: int, S: int) -> list[torch.Tensor]:
-        """
-        images : (B*S, 3, 224, 224) float32, ImageNet-normalised
-        B, S   : original batch and sequence dimensions
-        returns: list of 4 × (B, S, 256, 1280)
-        """
-        # encoder returns list of 4 × (B*S, 256, 1280) when out_layers is set
-        outs = self.encoder(images)
-        return [o.view(B, S, 256, 1280) for o in outs]
+        return [o.view(B, S, self.spec.num_patches, self.spec.embed_dim) for o in outs]

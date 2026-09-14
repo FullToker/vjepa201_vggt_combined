@@ -33,6 +33,7 @@ Usage
 
 from __future__ import annotations
 
+import functools
 import gc
 import json
 import platform
@@ -238,26 +239,50 @@ class GVJEPADataset(Dataset):
         }
 
 
-def gvjepa_collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+def gvjepa_collate(batch: List[Dict[str, Any]], x_encoder_type: str = "fusion_gv") -> Dict[str, Any]:
     """Collate a list of samples into a batched dict with preprocessed tensors.
 
     Calls fusion_gv.preprocess() per sample so each sample can have a different
     number of images.  Batch requires all samples to have the same S (number of
     frames); pad or truncate in the dataset if needed.
 
+    Args:
+        x_encoder_type: which visual tensor to build into the "images_jepa"
+            key below. "fusion_gv" builds the fixed 384px V-JEPA shape it
+            always needs; any other value is looked up in
+            encoder_registry.SEMANTIC_ENCODERS and its img_size/add_temporal_dim
+            drive a generic preprocess() call -- adding a new x_encoder_type
+            to the registry needs no change here. The key is always called
+            "images_jepa" regardless of which encoder produced it, so
+            GVJEPATrainer / infer_*.py (which just forward batch["images_jepa"]
+            into the model positionally) don't need to know which encoder is
+            configured -- build_x_encoder already picked the matching frozen
+            encoder from fusion.x_encoder_type.
+
     Returns:
         images_vggt : (B, S, 3, 518, 518)
-        images_jepa : (B*S, 3, 1, 384, 384)
+        images_jepa : (B*S, 3, 1, 384, 384) for "fusion_gv", or whatever
+                      shape SEMANTIC_ENCODERS[x_encoder_type] specifies otherwise
         queries     : list of B strings
         targets     : list of B strings
     """
+    from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
+
+    spec = None if x_encoder_type == "fusion_gv" else SEMANTIC_ENCODERS[x_encoder_type]
     vggt_list, jepa_list = [], []
     queries, targets, boxes_list = [], [], []
 
     for sample in batch:
-        imgs_v, imgs_j = preprocess(sample["image_paths"])
+        if spec is None:
+            imgs_v, imgs_j = preprocess(sample["image_paths"])
+            # imgs_j : (S, 3, 1, 384, 384)
+        else:
+            imgs_v, _, imgs_j = preprocess(
+                sample["image_paths"], need_jepa=False,
+                semantic_img_size=spec.img_size, semantic_add_t_dim=spec.add_temporal_dim,
+            )
+            # imgs_j : (S, 3, [1,] spec.img_size, spec.img_size)
         # imgs_v : (1, S, 3, 518, 518)
-        # imgs_j : (S,  3, 1, 384, 384)
         vggt_list.append(imgs_v)
         jepa_list.append(imgs_j)
         queries.append(sample["query"])
@@ -267,7 +292,7 @@ def gvjepa_collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     images_vggt = torch.cat(vggt_list, dim=0)   # (B, S, 3, 518, 518)
     images_jepa = torch.cat(
         [j.unsqueeze(0) for j in jepa_list], dim=0
-    ).flatten(0, 1)                              # (B*S, 3, 1, 384, 384)
+    ).flatten(0, 1)                              # (B*S, 3, 1, 384, 384) or (B*S, 3, 224, 224)
 
     return {
         "images_vggt": images_vggt,
@@ -697,10 +722,14 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     fusion_cfg = FusionConfig(
         x_encoder_type=f.get("x_encoder_type", "fusion_gv"),
         x_encoder_output_dim=f.get("x_encoder_output_dim"),
+        x_encoder_ckpt=f.get("x_encoder_ckpt"),
         vggt_ckpt=f.get("vggt_ckpt", "./ckpts/vggt.pt"),
         jepa_ckpt=f["jepa_ckpt"],
         proj_dim=f.get("proj_dim", 1024),
-        # encoder geometry (use dataclass defaults if not specified)
+        # encoder geometry (use dataclass defaults if not specified) -- only
+        # fusion_gv's fixed vggt/vjepa streams have dedicated fields; other
+        # x_encoder_type ablations (ijepa, ...) get their geometry from
+        # encoder_registry.SEMANTIC_ENCODERS instead, nothing to read here.
         **{k: f[k] for k in (
             "vggt_img_size", "vggt_patch_size", "vggt_embed_dim",
             "vggt_out_dim", "vggt_num_patches",
@@ -743,7 +772,10 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
     return FusionGVJEPA(model_cfg)
 
 
-def _build_loader(manifests: list[str], dcfg: dict, batch_size: int, num_frames: int | None = None) -> DataLoader:
+def _build_loader(
+    manifests: list[str], dcfg: dict, batch_size: int, num_frames: int | None = None,
+    x_encoder_type: str = "fusion_gv",
+) -> DataLoader:
     """Build a DataLoader from a list of manifest paths and data config."""
     from pathlib import Path
     from torch.utils.data import ConcatDataset
@@ -761,7 +793,7 @@ def _build_loader(manifests: list[str], dcfg: dict, batch_size: int, num_frames:
         "shuffle": True,
         "num_workers": num_workers,
         "pin_memory": dcfg.get("pin_memory", True),
-        "collate_fn": gvjepa_collate,
+        "collate_fn": functools.partial(gvjepa_collate, x_encoder_type=x_encoder_type),
         "drop_last": True,
     }
     if num_workers > 0:
@@ -774,7 +806,8 @@ def build_loader_from_config(cfg: dict) -> DataLoader:
     """Build SPAR DataLoader from config (uses data.spar_manifests or data.train_manifests)."""
     dcfg = cfg["data"]
     manifests = dcfg.get("spar_manifests") or dcfg["train_manifests"]
-    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"])
+    x_encoder_type = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv")
+    return _build_loader(manifests, dcfg, cfg["train"]["batch_size"], x_encoder_type=x_encoder_type)
 
 
 def build_grounding_loader_from_config(cfg: dict) -> Optional[DataLoader]:
@@ -785,7 +818,8 @@ def build_grounding_loader_from_config(cfg: dict) -> Optional[DataLoader]:
         return None
     num_frames = dcfg.get("grounding_num_frames", dcfg.get("num_frames"))
     batch_size = cfg["train"].get("grounding_batch_size", cfg["train"]["batch_size"])
-    return _build_loader(manifests, dcfg, batch_size, num_frames=num_frames)
+    x_encoder_type = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv")
+    return _build_loader(manifests, dcfg, batch_size, num_frames=num_frames, x_encoder_type=x_encoder_type)
 
 
 def build_val_loader_from_config(cfg: dict) -> Optional[DataLoader]:
@@ -822,7 +856,9 @@ def build_val_loader_from_config(cfg: dict) -> Optional[DataLoader]:
         drop_last=False,
         num_workers=dcfg.get("val_num_workers", 2),
         pin_memory=dcfg.get("pin_memory", True),
-        collate_fn=gvjepa_collate,
+        collate_fn=functools.partial(
+            gvjepa_collate, x_encoder_type=cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv")
+        ),
     )
 
 

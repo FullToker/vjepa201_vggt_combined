@@ -32,10 +32,6 @@ MODELS = {
     },
 }
 
-# I-JEPA (x_encoder_type="ijepa" ablation, optional) is not part of this
-# script -- it follows the dataset/download_*_ckpt.{sh,sbatch} pattern
-# instead (nested ckpts/ijepa/ subfolder), see dataset/download_ijepa_ckpt.sh
-
 
 def download(url: str, dest: str) -> None:
     try:

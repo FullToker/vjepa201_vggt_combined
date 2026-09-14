@@ -21,6 +21,7 @@ import torch
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
 
+from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
 from fusion_gv.mlflow_utils import start_mlflow_run
 from fusion_gv.gvjepa_trainer import (
     GVJEPATrainer,
@@ -71,7 +72,7 @@ def main() -> None:
                         help="Path to YAML config file")
     parser.add_argument(
         "--x-encoder-type",
-        choices=("fusion_gv", "vjepa"),
+        choices=("fusion_gv",) + tuple(SEMANTIC_ENCODERS.keys()),
         default=None,
         help="Override fusion.x_encoder_type from the YAML config",
     )

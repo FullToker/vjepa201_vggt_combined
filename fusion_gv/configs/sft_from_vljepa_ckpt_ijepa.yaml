@@ -1,0 +1,162 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FusionGVJEPA  ·  SFT stage  ·  x_encoder_type=ijepa ablation
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Sibling of sft_from_vljepa_ckpt.yaml (x_encoder_type=vjepa) with the single
+# X-encoder swapped for I-JEPA (image-pretrained, no video) via
+# encoder_registry.SEMANTIC_ENCODERS["ijepa"] -- everything else (data,
+# predictor/y_encoder architecture, warm-start ckpt, LR schedule, steps,
+# batch size) is IDENTICAL, so any score difference on VSI-Bench/MMSI-Bench
+# isolates "was the X-encoder trained on video or on static images", not a
+# confound from different data/hparams. See the video-vs-image-pretraining
+# ablation discussion this config was written for.
+#
+# Caveat (does NOT need fixing, just know it's there): init_vljepa_ckpt below
+# still warm-starts predictor.layers/norm and y_encoder/y_proj from
+# open-vljepa (those don't depend on the X-encoder). vis_proj does NOT
+# transfer here, unlike the vjepa baseline -- open-vljepa's vis_proj was
+# shaped for visual_dim=1024 (V-JEPA ViT-L), this run's is 1280 (I-JEPA
+# ViT-H) -- fusion_gv/load_vljepa_init.py's _load_matching skips shape
+# mismatches instead of raising, so vis_proj is left at random init here.
+# Same asymmetry the fusion_gv (VGGT+JEPA, 2048-d) variant already has.
+#
+# Get a checkpoint:
+#   bash dataset/download_open_vljepa_ckpt.sh   (or sbatch dataset/download_open_vljepa_ckpt.sbatch)
+#   sbatch dataset/test_forward_ijepa.sbatch     (I-JEPA ckpt, ~9.65GB)
+#
+# Get the training data (spar_sftqa_sftvljepa_uni8.jsonl below):
+#   sbatch dataset/convert_spar_sftqa_uni8.sbatch
+#
+# Run:
+#   sbatch fusion_gv/trainbatch/sft_from_vljepa_ckpt_ijepa.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ./ckpts/open_vljepa/best.pt
+
+
+# ── Frozen I-JEPA visual encoder (ablation: image-pretrained, no video) ──────
+fusion:
+  x_encoder_type: ijepa
+  x_encoder_output_dim: null
+  # x_encoder_ckpt: null   # unset -> encoder_registry default (ckpts/IN1K-vit.h.14-300e.pth.tar)
+
+  # Unused under x_encoder_type=ijepa (SingleEncoderXEncoder never reads it),
+  # but build_model_from_config requires the key to be present regardless --
+  # harmless placeholder, same value as sft_from_vljepa_ckpt.yaml's.
+  jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
+
+  vggt_ckpt: ./ckpts/vggt.pt
+  proj_dim: 1024
+
+
+# ── Predictor + projection heads ──────────────────────────────────────────────
+# Identical to sft_from_vljepa_ckpt.yaml -- this is the whole point of the
+# ablation (only the X-encoder differs).
+model:
+  predictor_hidden_size: 1024    # toy path only, ignored (llama forces h=2048)
+  predictor_layers:      8
+  predictor_heads:       16
+  predictor_ffn_mult:    4
+  predictor_dropout:     0.1
+
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens:  256
+
+  y_encoder_name:    google/embeddinggemma-300m
+  max_target_tokens: 256
+
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+
+  hf_cache_dir: ./ckpts
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+# Same manifest, same num_frames as the vjepa baseline.
+data:
+  train_manifests:
+    - ./data/spar_sftqa_sftvljepa_uni8.jsonl
+  num_frames: 8
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+# Identical hyperparameters to sft_from_vljepa_ckpt.yaml -- same batch_size,
+# max_steps, LR schedule. K=1 (visual_pool_k unset above -> mean-pool) on
+# both sides, and I-JEPA's per-frame token count (256) is smaller than
+# V-JEPA's (576), so this shouldn't need reprofiling -- but confirm with the
+# overfit config first rather than assuming (same reasoning the K128 sweep
+# comment already gives for not trusting single-GPU numbers blindly).
+train:
+  seed:    42
+  device:  cuda
+  precision: bf16
+
+  output_dir: ./outputs/sft_from_vljepa_ckpt_ijepa
+
+  batch_size:                   128
+  gradient_accumulation_steps:  1
+  max_steps: 6920
+
+  clip_grad_norm: 1.0
+  log_every:  50
+  save_every: 2000
+
+  learning_rate: 1.0e-5
+  min_lr:        1.0e-6
+  weight_decay:  0.01
+  adam_beta1:    0.9
+  adam_beta2:    0.95
+  adam_eps:      1.0e-8
+
+  scheduler:   cosine
+  temperature: 0.07
+
+
+# ── Inference: VSI-Bench ──────────────────────────────────────────────────────
+vsi_inference:
+  manifest: ./data/vsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt_ijepa/vsibench
+
+  checkpoint: null
+
+  mode: auto
+  save_grounding: false
+
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── Inference: MMSI-Bench ─────────────────────────────────────────────────────
+mmsi_inference:
+  manifest: ./data/mmsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt_ijepa/mmsibench
+
+  checkpoint: null
+
+  mode: auto
+  save_grounding: false
+
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
+mlflow:
+  enabled: true
+  env_file: .env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: null
+  log_params: true
+  tags:
+    project: vljepa-fusion-gv
+    variant: warm-start-open-vljepa-ijepa

@@ -25,10 +25,11 @@ import torch
 import torch.nn as nn
 
 from fusion_gv.config import FusionConfig
-from fusion_gv.encoders import FrozenVGGT, FrozenJEPA, FrozenIJEPA
+from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
+from fusion_gv.encoders import FrozenVGGT, FrozenSemanticEncoder
 from fusion_gv.fusion_aligned import SingleLevelFusion
 
-_X_ENCODER_TYPES = ("fusion_gv", "vjepa", "ijepa")
+_X_ENCODER_TYPES = ("fusion_gv",) + tuple(SEMANTIC_ENCODERS.keys())
 
 
 def _build_fusion(config: FusionConfig) -> nn.Module:
@@ -41,71 +42,40 @@ def _build_fusion(config: FusionConfig) -> nn.Module:
     )
 
 
-class VJEPAOnlyXEncoder(nn.Module):
-    """V-JEPA-only X-encoder with the same output contract as FusionGV."""
-
-    def __init__(self, config: FusionConfig | None = None):
-        super().__init__()
-        if config is None:
-            config = FusionConfig(x_encoder_type="vjepa")
-        self.config = config
-        self.jepa_encoder = FrozenJEPA(config.jepa_ckpt)
-
-    def forward(
-        self,
-        images_vggt: torch.Tensor | None,
-        images_jepa: torch.Tensor,
-        batch_size: int | None = None,
-    ) -> torch.Tensor:
-        """Return final-level V-JEPA features: (B, S, 576, 1024).
-
-        Args:
-            batch_size: required when images_vggt is None (its (B, S, ...)
-                shape is what normally carries B) -- images_jepa alone is
-                flattened (B*S, ...), ambiguous without B given separately.
-        """
-        if images_vggt is not None:
-            B, S = images_vggt.shape[:2]
-        else:
-            if batch_size is None:
-                raise ValueError(
-                    "batch_size is required when images_vggt is None -- "
-                    "images_jepa's flattened (B*S, ...) shape can't be split "
-                    "into (B, S) without it."
-                )
-            B = batch_size
-            S = images_jepa.shape[0] // B
-        return self.jepa_encoder(images_jepa, B, S)[-1]
-
-    def trainable_parameters(self):
-        return iter(())
-
-
-class IJEPAOnlyXEncoder(nn.Module):
-    """I-JEPA-only X-encoder: ablation counterpart to VJEPAOnlyXEncoder,
-    same output contract, swaps the video-pretrained V-JEPA encoder for
-    I-JEPA (image-pretrained, no video) -- isolates video pretraining as
-    the only varying factor between the two.
+class SingleEncoderXEncoder(nn.Module):
+    """Single-semantic-encoder X-encoder (no VGGT fusion) with the same
+    output contract as FusionGV. Which encoder gets built is resolved from
+    encoder_registry.SEMANTIC_ENCODERS[config.x_encoder_type] -- e.g. "vjepa"
+    (video-pretrained) vs "ijepa" (image-pretrained) for the video-vs-image
+    pretraining ablation. Adding a new encoder to compare only means adding
+    a spec to that registry; this class doesn't change.
     """
 
     def __init__(self, config: FusionConfig | None = None):
         super().__init__()
         if config is None:
-            config = FusionConfig(x_encoder_type="ijepa")
+            config = FusionConfig(x_encoder_type="vjepa")
+        if config.x_encoder_type not in SEMANTIC_ENCODERS:
+            raise ValueError(
+                f"Unknown x_encoder_type '{config.x_encoder_type}' for "
+                f"SingleEncoderXEncoder. Choose from {tuple(SEMANTIC_ENCODERS.keys())}."
+            )
         self.config = config
-        self.ijepa_encoder = FrozenIJEPA(config.ijepa_ckpt)
+        spec = SEMANTIC_ENCODERS[config.x_encoder_type]
+        ckpt_path = config.x_encoder_ckpt or spec.default_ckpt
+        self.encoder = FrozenSemanticEncoder(spec, ckpt_path)
 
     def forward(
         self,
         images_vggt: torch.Tensor | None,
-        images_ijepa: torch.Tensor,
+        images_semantic: torch.Tensor,
         batch_size: int | None = None,
     ) -> torch.Tensor:
-        """Return final-level I-JEPA features: (B, S, 256, 1280).
+        """Return final-level semantic features: (B, S, spec.num_patches, spec.embed_dim).
 
         Args:
             batch_size: required when images_vggt is None (its (B, S, ...)
-                shape is what normally carries B) -- images_ijepa alone is
+                shape is what normally carries B) -- images_semantic alone is
                 flattened (B*S, ...), ambiguous without B given separately.
         """
         if images_vggt is not None:
@@ -114,12 +84,12 @@ class IJEPAOnlyXEncoder(nn.Module):
             if batch_size is None:
                 raise ValueError(
                     "batch_size is required when images_vggt is None -- "
-                    "images_ijepa's flattened (B*S, ...) shape can't be split "
+                    "images_semantic's flattened (B*S, ...) shape can't be split "
                     "into (B, S) without it."
                 )
             B = batch_size
-            S = images_ijepa.shape[0] // B
-        return self.ijepa_encoder(images_ijepa, B, S)[-1]
+            S = images_semantic.shape[0] // B
+        return self.encoder(images_semantic, B, S)[-1]
 
     def trainable_parameters(self):
         return iter(())
@@ -131,10 +101,8 @@ def build_x_encoder(config: FusionConfig | None = None) -> nn.Module:
         config = FusionConfig()
     if config.x_encoder_type == "fusion_gv":
         return FusionGV(config)
-    if config.x_encoder_type == "vjepa":
-        return VJEPAOnlyXEncoder(config)
-    if config.x_encoder_type == "ijepa":
-        return IJEPAOnlyXEncoder(config)
+    if config.x_encoder_type in SEMANTIC_ENCODERS:
+        return SingleEncoderXEncoder(config)
     raise ValueError(
         f"Unknown x_encoder_type '{config.x_encoder_type}'. "
         f"Choose from {_X_ENCODER_TYPES}."
@@ -146,8 +114,8 @@ class FusionGV(nn.Module):
     Top-level model.
 
     Frozen encoders (only the final level of each is used):
-        FrozenVGGT  — geometric features, final level (B, S, 1369, 2048)
-        FrozenJEPA  — semantic features,  final level (B, S,  576, 1024)
+        FrozenVGGT             — geometric features, final level (B, S, 1369, 2048)
+        FrozenSemanticEncoder  — semantic features (vjepa spec), final level (B, S, 576, 1024)
 
     Fusion module: SingleLevelFusion (per-stream LN+MLP projector,
     bilinear spatial align, channel concat). Output dim = 2 * config.proj_dim
@@ -165,7 +133,9 @@ class FusionGV(nn.Module):
         self.config = config
 
         self.vggt_encoder = FrozenVGGT(config.vggt_ckpt)
-        self.jepa_encoder = FrozenJEPA(config.jepa_ckpt)
+        # Fixed to the "vjepa" spec regardless of config.x_encoder_type --
+        # fusion_gv's semantic stream isn't swappable in this architecture.
+        self.jepa_encoder = FrozenSemanticEncoder(SEMANTIC_ENCODERS["vjepa"], config.jepa_ckpt)
 
         self.fusion = _build_fusion(config)
 
@@ -181,7 +151,7 @@ class FusionGV(nn.Module):
             images_jepa : (B*S, 3, 1, 384, 384) float32, ImageNet-normalised
             batch_size  : unused here (images_vggt always carries B, S) --
                 accepted only so callers can treat FusionGV and
-                VJEPAOnlyXEncoder interchangeably (the latter needs it when
+                SingleEncoderXEncoder interchangeably (the latter needs it when
                 images_vggt is None).
 
         Returns:

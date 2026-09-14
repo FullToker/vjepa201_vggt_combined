@@ -149,13 +149,22 @@ def _bucket_batches(num_images: List[int], batch_size: int) -> List[List[int]]:
     return batches
 
 
-def mmsibench_collate(items: List[Dict[str, Any]], need_vggt: bool) -> Dict[str, Any]:
+def mmsibench_collate(items: List[Dict[str, Any]], need_vggt: bool, x_encoder_type: str = "fusion_gv") -> Dict[str, Any]:
+    from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
+
+    spec = None if x_encoder_type == "fusion_gv" else SEMANTIC_ENCODERS[x_encoder_type]
     vggt_list, jepa_list = [], []
     queries, targets, candidates_list = [], [], []
     ids, row_idxs, qtypes, image_paths_list = [], [], [], []
 
     for item in items:
-        imgs_v, imgs_j = preprocess(item["image_paths"], need_vggt=need_vggt, need_jepa=True)
+        if spec is None:
+            imgs_v, imgs_j = preprocess(item["image_paths"], need_vggt=need_vggt, need_jepa=True)
+        else:
+            imgs_v, _, imgs_j = preprocess(
+                item["image_paths"], need_vggt=need_vggt, need_jepa=False,
+                semantic_img_size=spec.img_size, semantic_add_t_dim=spec.add_temporal_dim,
+            )
         if imgs_v is not None:
             vggt_list.append(imgs_v)
         jepa_list.append(imgs_j)
@@ -276,7 +285,8 @@ def main() -> None:
     step = _load_checkpoint(model, checkpoint_path)
     model.to(device).eval()
 
-    need_vggt = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv") == "fusion_gv"
+    x_encoder_type = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv")
+    need_vggt = x_encoder_type == "fusion_gv"
 
     dataset = MMSIBenchDataset(manifest_path)
     batches = _bucket_batches(dataset.num_images, batch_size)
@@ -303,7 +313,7 @@ def main() -> None:
         dataset,
         batch_sampler=batches,
         num_workers=num_workers,
-        collate_fn=lambda items: mmsibench_collate(items, need_vggt),
+        collate_fn=lambda items: mmsibench_collate(items, need_vggt, x_encoder_type),
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
