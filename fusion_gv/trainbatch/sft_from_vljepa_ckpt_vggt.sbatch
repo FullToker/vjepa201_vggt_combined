@@ -50,7 +50,7 @@
 #   dataset/make_vsibench_manifest.py / make_mmsibench_manifest.py already run # -> data/{vsibench,mmsibench}_manifest.jsonl
 #
 # Run the overfit check first -- it's also what tells you whether
-# batch_size=32 is too conservative (see its yaml's rationale) before
+# batch_size=64 is too conservative (see its yaml's rationale) before
 # committing a week of single-GPU time to this:
 #   sbatch fusion_gv/trainbatch/overfit_sft_from_vljepa_ckpt_vggt.sbatch
 #
