@@ -1,0 +1,147 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FusionGVJEPA  ·  overfit sanity check  ·  warm-started from open-vljepa
+# ·  vggt-only encoder (2048-d, pure geometric, no semantic stream at all)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Self-contained sibling of sft_from_vljepa_ckpt_vggt.yaml, used ONLY by
+# trainbatch/overfit_sft_from_vljepa_ckpt_vggt.sbatch. Same predictor/data/
+# init_vljepa_ckpt as the real run, but its own train.output_dir and its own
+# vsi_inference/mmsi_inference output_dirs. Matches overfit_from_vljepa_ckpt_ijepa.yaml's
+# structure -- only fusion.x_encoder_type differs (and there's no semantic
+# encoder section at all here, see below).
+#
+# batch_size=64 (not the vjepa/ijepa overfit configs' 128): VGGT processes
+# 518px input (vs V-JEPA's 384px / I-JEPA's 224px) through a ~1B-param
+# Aggregator -- no single-GPU profiling exists yet for VGGT running alone
+# (only ever measured fused with V-JEPA: the K128-sweep's K=1/batch=32
+# combined-model number was 40.7GB against a ~79GB ceiling). VGGT-only drops
+# the V-JEPA ViT-L stream (384px, 300M params) and the fusion module, which
+# should free up real headroom -- but VGGT itself (518px, ~1B params) was
+# very likely already the dominant consumer in that fused number, so 64 is a
+# reasoned bump, not a measured one. This overfit run is what confirms (or
+# corrects) it before the real multi-day run trusts it -- if 64 turns out to
+# have lots of headroom too, raise it further (and lower the real run's
+# gradient_accumulation_steps to match, keeping effective batch 384).
+#
+# Run:
+#   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/overfit_from_vljepa_ckpt_vggt.yaml \
+#       --overfit --overfit-samples 64 --overfit-steps 200
+#   python fusion_gv/infer_vsibench.py  --config fusion_gv/configs/overfit_from_vljepa_ckpt_vggt.yaml --config-section vsi_inference
+#   python fusion_gv/infer_mmsibench.py --config fusion_gv/configs/overfit_from_vljepa_ckpt_vggt.yaml --config-section mmsi_inference
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ./ckpts/open_vljepa/best.pt
+
+
+# ── Frozen VGGT visual encoder (ablation: pure geometry, no semantic stream) ─
+fusion:
+  x_encoder_type: vggt
+
+  # Unused under x_encoder_type=vggt (VGGTOnlyXEncoder never reads it), but
+  # build_model_from_config requires the key regardless -- harmless
+  # placeholder, same value as the vjepa/ijepa configs'.
+  jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
+
+  vggt_ckpt: ./ckpts/vggt.pt
+  proj_dim: 1024
+
+
+# ── Predictor + projection heads ──────────────────────────────────────────────
+# Identical to the vjepa/ijepa overfit configs -- only the X-encoder differs
+# between all three ablation arms.
+model:
+  predictor_hidden_size: 1024
+  predictor_layers:      8
+  predictor_heads:       16
+  predictor_ffn_mult:    4
+  predictor_dropout:     0.1
+
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens:  256
+
+  y_encoder_name:    google/embeddinggemma-300m
+  max_target_tokens: 256
+
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+
+  hf_cache_dir: ./ckpts
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+data:
+  train_manifests:
+    - ./data/spar_sftqa_sftvljepa_uni8.jsonl
+  num_frames: 8
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+train:
+  seed:    42
+  device:  cuda
+  precision: bf16
+
+  # Distinct from sft_from_vljepa_ckpt_vggt.yaml's real output_dir.
+  output_dir: ./outputs/sft_from_vljepa_ckpt_vggt_overfit
+
+  # Matches the real run's per-step batch_size=64 (see sft_from_vljepa_ckpt_vggt.yaml)
+  # -- --overfit-samples should be passed as 64 too, so per-GPU tensor
+  # shapes/memory match. --overfit forces grad_accum_steps=1 regardless of
+  # what's set here (train_gvjepa.py), so gradient_accumulation_steps is
+  # irrelevant for this file.
+  batch_size: 64
+  gradient_accumulation_steps: 1
+  # --overfit on the CLI forces max_steps/log_every/save_every from
+  # --overfit-steps/hardcoded values at runtime regardless of what's here --
+  # kept as a readable placeholder matching train_gvjepa.py's --overfit-steps default.
+  max_steps: 200
+  clip_grad_norm: 1.0
+  log_every: 10
+  save_every: 0
+
+  learning_rate: 1.0e-5
+  min_lr:        1.0e-6
+  weight_decay:  0.01
+  adam_beta1:    0.9
+  adam_beta2:    0.95
+  adam_eps:      1.0e-8
+
+  scheduler:   cosine
+  temperature: 0.07
+
+
+# ── Inference: VSI-Bench ──────────────────────────────────────────────────────
+vsi_inference:
+  manifest: ./data/vsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt_vggt_overfit/vsibench
+  checkpoint: null   # -> train.output_dir above -> final.pt
+  mode: auto
+  save_grounding: false
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── Inference: MMSI-Bench ─────────────────────────────────────────────────────
+mmsi_inference:
+  manifest: ./data/mmsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt_vggt_overfit/mmsibench
+  checkpoint: null
+  mode: auto
+  save_grounding: false
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
+# Off by default -- this is a sanity check, not a run worth tracking.
+mlflow:
+  enabled: false

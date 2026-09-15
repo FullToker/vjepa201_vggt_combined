@@ -1,0 +1,175 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FusionGVJEPA  ·  SFT stage  ·  x_encoder_type=vggt ablation (single GPU)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Third arm of the X-encoder ablation, alongside sft_from_vljepa_ckpt.yaml
+# (x_encoder_type=vjepa) and sft_from_vljepa_ckpt_ijepa.yaml (x_encoder_type=ijepa).
+# This one has NO semantic stream at all -- pure explicit multi-view geometry
+# (VGGT alone). Answers "does explicit geometric multi-view training already
+# cover what a video/image-pretrained semantic encoder (or ScanNet
+# pretraining) would add".
+#
+# Single GPU, not 3 like the other two arms' sbatch -- no single-GPU (or
+# multi-GPU) memory profile exists yet for VGGT running alone, so this
+# starts conservative (see overfit_from_vljepa_ckpt_vggt.yaml's batch_size
+# rationale) rather than assuming the vjepa/ijepa arms' 3-GPU numbers carry
+# over to a structurally different, heavier (518px, ~1B-param) encoder.
+#
+# To keep this arm's total data coverage/optimizer-update count identical to
+# the other two (so all three are actually comparable, not just "ran the
+# same max_steps"), batch_size is traded for gradient_accumulation_steps
+# instead of GPU count: batch_size=64 * accum=6 = effective batch 384,
+# same as sft_from_vljepa_ckpt.yaml's batch_size=128 * 1 * 3 GPUs = 384.
+# max_steps is therefore UNCHANGED (6920, same 1.5-epoch target) -- only
+# wall-clock throughput differs (single GPU doing 6x the forward/backward
+# passes per optimizer step that 3 GPUs did in parallel), not the training
+# dynamics or amount of data seen. batch_size=64 (not 32) is a reasoned-but-
+# unmeasured bump from removing V-JEPA+fusion out of the K-sweep's fused
+# 40.7GB/batch=32 number -- overfit_from_vljepa_ckpt_vggt.yaml's overfit run
+# is what actually confirms it fits before trusting it for a multi-day job.
+#
+# Caveat (does NOT need fixing, just know it's there): unlike the vjepa arm,
+# open-vljepa's vis_proj (shaped for visual_dim=1024) does NOT transfer here
+# either -- VGGT's visual_dim is 2048. Left at random init, same asymmetry
+# the ijepa and fusion_gv arms already have. predictor.layers/norm and
+# y_encoder/y_proj still transfer fine (X-encoder-independent).
+#
+# Get a checkpoint:
+#   bash dataset/download_open_vljepa_ckpt.sh   (or sbatch dataset/download_open_vljepa_ckpt.sbatch)
+#   python download_ckpts.py --models vggt        # ckpts/vggt.pt, if not already there
+#
+# Get the training data (spar_sftqa_sftvljepa_uni8.jsonl below):
+#   sbatch dataset/convert_spar_sftqa_uni8.sbatch
+#
+# Run the overfit check first:
+#   sbatch fusion_gv/trainbatch/overfit_sft_from_vljepa_ckpt_vggt.sbatch
+# Then the real run:
+#   sbatch fusion_gv/trainbatch/sft_from_vljepa_ckpt_vggt.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ./ckpts/open_vljepa/best.pt
+
+
+# ── Frozen VGGT visual encoder (ablation: pure geometry, no semantic stream) ─
+fusion:
+  x_encoder_type: vggt
+
+  # Unused under x_encoder_type=vggt, but build_model_from_config requires
+  # the key regardless -- harmless placeholder, same value as the other arms'.
+  jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
+
+  vggt_ckpt: ./ckpts/vggt.pt
+  proj_dim: 1024
+
+
+# ── Predictor + projection heads ──────────────────────────────────────────────
+# Identical to the vjepa/ijepa arms -- this is the whole point of the ablation.
+model:
+  predictor_hidden_size: 1024    # toy path only, ignored (llama forces h=2048)
+  predictor_layers:      8
+  predictor_heads:       16
+  predictor_ffn_mult:    4
+  predictor_dropout:     0.1
+
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens:  256
+
+  y_encoder_name:    google/embeddinggemma-300m
+  max_target_tokens: 256
+
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+
+  hf_cache_dir: ./ckpts
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+# Same manifest, same num_frames as the other two arms. num_workers=2 (not
+# 4) -- single process now pulling for the whole effective batch instead of
+# 3 GPU-ranks splitting the load, no need to multiply worker count further.
+data:
+  train_manifests:
+    - ./data/spar_sftqa_sftvljepa_uni8.jsonl
+  num_frames: 8
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+train:
+  seed:    42
+  device:  cuda
+  precision: bf16
+
+  output_dir: ./outputs/sft_from_vljepa_ckpt_vggt
+
+  # batch_size(64) * accum(6) * 1 GPU = 384 -- same effective batch as the
+  # vjepa/ijepa arms' batch_size(128) * 1 * 3 GPUs. See header for why.
+  batch_size:                   64
+  gradient_accumulation_steps:  6
+  # Unchanged from the vjepa/ijepa arms' max_steps -- same effective batch
+  # means same 1.5-epoch data coverage per optimizer step count:
+  #   ceil(1.5 * 1,771,283 / 384) = 6,920
+  max_steps: 6920
+
+  clip_grad_norm: 1.0
+  log_every:  50
+  save_every: 2000
+
+  learning_rate: 1.0e-5
+  min_lr:        1.0e-6
+  weight_decay:  0.01
+  adam_beta1:    0.9
+  adam_beta2:    0.95
+  adam_eps:      1.0e-8
+
+  scheduler:   cosine
+  temperature: 0.07
+
+
+# ── Inference: VSI-Bench ──────────────────────────────────────────────────────
+vsi_inference:
+  manifest: ./data/vsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt_vggt/vsibench
+
+  checkpoint: null
+
+  mode: auto
+  save_grounding: false
+
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── Inference: MMSI-Bench ─────────────────────────────────────────────────────
+mmsi_inference:
+  manifest: ./data/mmsibench_manifest.jsonl
+  output_dir: ./outputs/inference/sft_from_vljepa_ckpt_vggt/mmsibench
+
+  checkpoint: null
+
+  mode: auto
+  save_grounding: false
+
+  batch_size: 8
+  num_workers: 8
+  device: cuda
+  precision: bf16
+
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
+mlflow:
+  enabled: true
+  env_file: .env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: null
+  log_params: true
+  tags:
+    project: vljepa-fusion-gv
+    variant: warm-start-open-vljepa-vggt
