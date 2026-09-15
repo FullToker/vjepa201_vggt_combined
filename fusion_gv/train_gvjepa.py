@@ -72,7 +72,7 @@ def main() -> None:
                         help="Path to YAML config file")
     parser.add_argument(
         "--x-encoder-type",
-        choices=("fusion_gv",) + tuple(SEMANTIC_ENCODERS.keys()),
+        choices=("fusion_gv", "vggt") + tuple(SEMANTIC_ENCODERS.keys()),
         default=None,
         help="Override fusion.x_encoder_type from the YAML config",
     )

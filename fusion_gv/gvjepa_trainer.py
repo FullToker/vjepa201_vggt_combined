@@ -239,6 +239,12 @@ class GVJEPADataset(Dataset):
         }
 
 
+def _maybe_to_device(t: torch.Tensor | None, device: torch.device) -> torch.Tensor | None:
+    """batch["images_jepa"] is None under x_encoder_type="vggt" (no semantic
+    stream) -- .to() would crash on None, everywhere else it's a real tensor."""
+    return t.to(device, non_blocking=True) if t is not None else None
+
+
 def gvjepa_collate(batch: List[Dict[str, Any]], x_encoder_type: str = "fusion_gv") -> Dict[str, Any]:
     """Collate a list of samples into a batched dict with preprocessed tensors.
 
@@ -249,24 +255,46 @@ def gvjepa_collate(batch: List[Dict[str, Any]], x_encoder_type: str = "fusion_gv
     Args:
         x_encoder_type: which visual tensor to build into the "images_jepa"
             key below. "fusion_gv" builds the fixed 384px V-JEPA shape it
-            always needs; any other value is looked up in
-            encoder_registry.SEMANTIC_ENCODERS and its img_size/add_temporal_dim
-            drive a generic preprocess() call -- adding a new x_encoder_type
-            to the registry needs no change here. The key is always called
-            "images_jepa" regardless of which encoder produced it, so
-            GVJEPATrainer / infer_*.py (which just forward batch["images_jepa"]
-            into the model positionally) don't need to know which encoder is
-            configured -- build_x_encoder already picked the matching frozen
-            encoder from fusion.x_encoder_type.
+            always needs; "vggt" needs no semantic tensor at all (images_jepa
+            comes back None -- VGGTOnlyXEncoder never touches it, see
+            gvjepa.py's _run_predictor/_pool_visual, which only dereference
+            images_jepa when images_vggt is None, never the other way round);
+            any other value is looked up in encoder_registry.SEMANTIC_ENCODERS
+            and its img_size/add_temporal_dim drive a generic preprocess()
+            call -- adding a new x_encoder_type to the registry needs no
+            change here. The key is always called "images_jepa" regardless
+            of which encoder produced it, so GVJEPATrainer / infer_*.py
+            (which just forward batch["images_jepa"] into the model
+            positionally) don't need to know which encoder is configured --
+            build_x_encoder already picked the matching frozen encoder from
+            fusion.x_encoder_type.
 
     Returns:
         images_vggt : (B, S, 3, 518, 518)
-        images_jepa : (B*S, 3, 1, 384, 384) for "fusion_gv", or whatever
-                      shape SEMANTIC_ENCODERS[x_encoder_type] specifies otherwise
+        images_jepa : (B*S, 3, 1, 384, 384) for "fusion_gv", None for "vggt",
+                      or whatever shape SEMANTIC_ENCODERS[x_encoder_type]
+                      specifies otherwise
         queries     : list of B strings
         targets     : list of B strings
     """
     from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
+
+    if x_encoder_type == "vggt":
+        vggt_list = []
+        queries, targets, boxes_list = [], [], []
+        for sample in batch:
+            imgs_v, _ = preprocess(sample["image_paths"], need_jepa=False)   # imgs_v : (1, S, 3, 518, 518)
+            vggt_list.append(imgs_v)
+            queries.append(sample["query"])
+            targets.append(sample["target"])
+            boxes_list.append(sample["boxes"])
+        return {
+            "images_vggt": torch.cat(vggt_list, dim=0),   # (B, S, 3, 518, 518)
+            "images_jepa": None,   # VGGTOnlyXEncoder ignores this arg entirely
+            "query": queries,
+            "target": targets,
+            "boxes": boxes_list,
+        }
 
     spec = None if x_encoder_type == "fusion_gv" else SEMANTIC_ENCODERS[x_encoder_type]
     vggt_list, jepa_list = [], []
@@ -423,7 +451,7 @@ class GVJEPATrainer:
         """
         device = self.accelerator.device
         images_vggt = batch["images_vggt"].to(device, non_blocking=True)
-        images_jepa = batch["images_jepa"].to(device, non_blocking=True)
+        images_jepa = _maybe_to_device(batch["images_jepa"], device)
 
         raw_model = self.accelerator.unwrap_model(self.model)
         with self.accelerator.autocast():
@@ -478,7 +506,7 @@ class GVJEPATrainer:
         """Forward + InfoNCE only. Returns (loss, infonce_loss_val)."""
         device = self.accelerator.device
         images_vggt = batch["images_vggt"].to(device, non_blocking=True)
-        images_jepa = batch["images_jepa"].to(device, non_blocking=True)
+        images_jepa = _maybe_to_device(batch["images_jepa"], device)
 
         with self.accelerator.autocast():
             out = self.model(images_vggt, images_jepa, batch["query"], batch["target"])
@@ -507,7 +535,7 @@ class GVJEPATrainer:
             if i >= self.val_max_batches:
                 break
             images_vggt = batch["images_vggt"].to(device, non_blocking=True)
-            images_jepa = batch["images_jepa"].to(device, non_blocking=True)
+            images_jepa = _maybe_to_device(batch["images_jepa"], device)
             with self.accelerator.autocast():
                 out = raw_model(images_vggt, images_jepa, batch["query"], batch["target"])
                 loss = bidirectional_infonce(out["pred"], out["target"], temperature=self.temperature)

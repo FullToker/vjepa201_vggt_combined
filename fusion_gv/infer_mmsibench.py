@@ -152,13 +152,16 @@ def _bucket_batches(num_images: List[int], batch_size: int) -> List[List[int]]:
 def mmsibench_collate(items: List[Dict[str, Any]], need_vggt: bool, x_encoder_type: str = "fusion_gv") -> Dict[str, Any]:
     from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
 
-    spec = None if x_encoder_type == "fusion_gv" else SEMANTIC_ENCODERS[x_encoder_type]
+    is_vggt_only = x_encoder_type == "vggt"
+    spec = None if x_encoder_type in ("fusion_gv", "vggt") else SEMANTIC_ENCODERS[x_encoder_type]
     vggt_list, jepa_list = [], []
     queries, targets, candidates_list = [], [], []
     ids, row_idxs, qtypes, image_paths_list = [], [], [], []
 
     for item in items:
-        if spec is None:
+        if is_vggt_only:
+            imgs_v, imgs_j = preprocess(item["image_paths"], need_vggt=True, need_jepa=False)
+        elif spec is None:
             imgs_v, imgs_j = preprocess(item["image_paths"], need_vggt=need_vggt, need_jepa=True)
         else:
             imgs_v, _, imgs_j = preprocess(
@@ -167,7 +170,8 @@ def mmsibench_collate(items: List[Dict[str, Any]], need_vggt: bool, x_encoder_ty
             )
         if imgs_v is not None:
             vggt_list.append(imgs_v)
-        jepa_list.append(imgs_j)
+        if imgs_j is not None:
+            jepa_list.append(imgs_j)
         queries.append(item["query"])
         targets.append(item["target"])
         candidates_list.append(item["candidates"])
@@ -177,7 +181,11 @@ def mmsibench_collate(items: List[Dict[str, Any]], need_vggt: bool, x_encoder_ty
         image_paths_list.append(item["image_paths"])
 
     images_vggt = torch.cat(vggt_list, dim=0) if vggt_list else None
-    images_jepa = torch.cat([j.unsqueeze(0) for j in jepa_list], dim=0).flatten(0, 1)
+    # jepa_list empty -> x_encoder_type="vggt", no semantic stream at all
+    # (VGGTOnlyXEncoder ignores this key entirely).
+    images_jepa = (
+        torch.cat([j.unsqueeze(0) for j in jepa_list], dim=0).flatten(0, 1) if jepa_list else None
+    )
 
     return {
         "images_vggt": images_vggt,
@@ -286,7 +294,7 @@ def main() -> None:
     model.to(device).eval()
 
     x_encoder_type = cfg.get("fusion", {}).get("x_encoder_type", "fusion_gv")
-    need_vggt = x_encoder_type == "fusion_gv"
+    need_vggt = x_encoder_type in ("fusion_gv", "vggt")
 
     dataset = MMSIBenchDataset(manifest_path)
     batches = _bucket_batches(dataset.num_images, batch_size)
@@ -352,7 +360,7 @@ def main() -> None:
         for _profile_idx, batch in enumerate(tqdm(loader, desc="mmsibench-infer")):
             prof_step(prof)
             images_vggt = batch["images_vggt"].to(device) if batch["images_vggt"] is not None else None
-            images_jepa = batch["images_jepa"].to(device)
+            images_jepa = batch["images_jepa"].to(device) if batch["images_jepa"] is not None else None
             queries = batch["query"]
             B = len(queries)
             S = len(batch["image_paths"][0])

@@ -197,4 +197,52 @@ for enc_name, spec in SEMANTIC_ENCODERS.items():
         print(f"         pred embedding   : {r_gvjepa}")
 
 
+# ── Phase 6: VGGT-only X-encoder forward (no semantic stream at all) ─────────
+print("\n=== Phase 6: VGGT-only X-encoder forward (requires VGGT ckpt) ===")
+
+if not os.path.exists(vggt_ckpt):
+    print(f"  [{SKIP}] checkpoint not found: ckpts/vggt.pt")
+    print(f"           run: python download_ckpts.py")
+else:
+    from fusion_gv.model import VGGTOnlyXEncoder
+
+    def _test_vggt_only_xencoder():
+        cfg = FusionConfig(x_encoder_type="vggt")
+        model = VGGTOnlyXEncoder(cfg).eval()
+        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
+        vggt_t, _ = preprocess(imgs, need_jepa=False)
+        with torch.no_grad():
+            out = model(vggt_t)
+        assert out.shape == (1, S, 1369, 2048), out.shape
+        return out.shape
+
+    def _test_gvjepa_with_vggt_only():
+        fusion_cfg = FusionConfig(x_encoder_type="vggt")
+        model_cfg = GVJEPAConfig(
+            fusion=fusion_cfg,
+            predictor_hidden_size=128,
+            predictor_layers=1,
+            predictor_heads=4,
+            shared_embed_dim=64,
+            query_model_name="toy",
+            y_encoder_name="toy",
+        )
+        model = FusionGVJEPA(model_cfg).eval()
+        imgs = [Image.new("RGB", (640, 480)) for _ in range(S)]
+        vggt_t, _ = preprocess(imgs, need_jepa=False)
+        with torch.no_grad():
+            # images_jepa=None -- no semantic stream, VGGTOnlyXEncoder ignores it
+            out = model(vggt_t, None, queries=["describe scene"], targets=["a scene"])
+        assert out["pred"].shape == (1, 64), out["pred"].shape
+        assert out["target"].shape == (1, 64), out["target"].shape
+        return out["pred"].shape
+
+    r9 = check("VGGTOnlyXEncoder forward → (B,S,1369,2048)", _test_vggt_only_xencoder)
+    r10 = check("FusionGVJEPA x_encoder_type='vggt' forward (images_jepa=None)", _test_gvjepa_with_vggt_only)
+    if r9:
+        print(f"         output shape     : {r9}")
+    if r10:
+        print(f"         pred embedding   : {r10}")
+
+
 print("\n=== done ===\n")

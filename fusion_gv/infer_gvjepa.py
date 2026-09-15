@@ -176,7 +176,10 @@ class _InferenceDataset(Dataset):
         self.rows = rows
         self.input_root = input_root
         self.need_vggt = need_vggt
-        self.spec = None if x_encoder_type == "fusion_gv" else SEMANTIC_ENCODERS[x_encoder_type]
+        self.x_encoder_type = x_encoder_type
+        self.spec = (
+            None if x_encoder_type in ("fusion_gv", "vggt") else SEMANTIC_ENCODERS[x_encoder_type]
+        )
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -184,7 +187,9 @@ class _InferenceDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self.rows[idx]
         paths = _image_paths(row, self.input_root)
-        if self.spec is None:
+        if self.x_encoder_type == "vggt":
+            imgs_v, imgs_j = preprocess(paths, need_vggt=True, need_jepa=False)   # imgs_j always None here
+        elif self.spec is None:
             imgs_v, imgs_j = preprocess(paths, need_vggt=self.need_vggt, need_jepa=True)
         else:
             imgs_v, _, imgs_j = preprocess(
@@ -205,8 +210,8 @@ def _infer_collate(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     for item in items:
         imgs_v = item["images_vggt"]
         imgs_j = item["images_jepa"]
-        if imgs_j is None:
-            raise ValueError("Inference requires V-JEPA inputs.")
+        if imgs_j is None and imgs_v is None:
+            raise ValueError("Inference requires V-JEPA or VGGT inputs (both are None).")
         s = imgs_v.shape[1] if imgs_v is not None else imgs_j.shape[0]
         if expected_s is None:
             expected_s = s
@@ -217,7 +222,8 @@ def _infer_collate(items: List[Dict[str, Any]]) -> Dict[str, Any]:
             )
         if imgs_v is not None:
             vggt_list.append(imgs_v)
-        jepa_list.append(imgs_j)
+        if imgs_j is not None:
+            jepa_list.append(imgs_j)
         queries.append(item["query"])
         rows.append(item["row"])
 
@@ -226,10 +232,17 @@ def _infer_collate(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     else:
         images_vggt = torch.empty(len(items), expected_s or 0, 0)
 
+    # jepa_list empty -> x_encoder_type="vggt", no semantic stream at all
+    # (VGGTOnlyXEncoder ignores this key entirely, same convention as
+    # gvjepa_collate/gvjepa_trainer.py's images_jepa=None).
+    images_jepa = (
+        torch.cat([j.unsqueeze(0) for j in jepa_list], dim=0).flatten(0, 1) if jepa_list else None
+    )
+
     return {
         "rows": rows,
         "images_vggt": images_vggt,
-        "images_jepa": torch.cat([j.unsqueeze(0) for j in jepa_list], dim=0).flatten(0, 1),
+        "images_jepa": images_jepa,
         "queries": queries,
     }
 
@@ -298,7 +311,7 @@ def main() -> None:
     parser.add_argument("--precision", choices=("fp32", "bf16", "fp16"), default=None)
     parser.add_argument("--mode", choices=("auto", "embedding", "select", "multichoices"), default=None)
     parser.add_argument(
-        "--x-encoder-type", choices=("fusion_gv",) + tuple(SEMANTIC_ENCODERS.keys()), default=None
+        "--x-encoder-type", choices=("fusion_gv", "vggt") + tuple(SEMANTIC_ENCODERS.keys()), default=None
     )
     parser.add_argument("--x-encoder-output-dim", type=int, default=None)
     parser.add_argument(
@@ -392,7 +405,10 @@ def main() -> None:
             for batch in tqdm(loader, total=pbar_total, desc="gvjepa-infer"):
                 rows_batch = batch["rows"]
                 images_vggt = batch["images_vggt"].to(device, non_blocking=pin_memory)
-                images_jepa = batch["images_jepa"].to(device, non_blocking=pin_memory)
+                images_jepa = (
+                    batch["images_jepa"].to(device, non_blocking=pin_memory)
+                    if batch["images_jepa"] is not None else None
+                )   # None under x_encoder_type="vggt" -- no semantic stream
                 queries = batch["queries"]
 
                 with torch.autocast(device_type=device.type, dtype=dtype, enabled=autocast_enabled):

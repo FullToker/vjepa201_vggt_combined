@@ -11,6 +11,7 @@ _ROOT = os.path.dirname(os.path.dirname(__file__))
 class FusionConfig:
     # X-encoder mode used by the training stack.
     # "fusion_gv" keeps the current VGGT + V-JEPA concat encoder.
+    # "vggt" uses VGGT alone (pure geometric, no semantic stream at all).
     # Any other value must be a key in encoder_registry.SEMANTIC_ENCODERS
     # (currently "vjepa", "ijepa") -- that single semantic encoder alone
     # becomes the X-encoder, no VGGT. See encoder_registry.py to add one.
@@ -61,23 +62,25 @@ class FusionConfig:
             return self.x_encoder_output_dim
         if self.x_encoder_type == "fusion_gv":
             return self.proj_dim * 2
+        if self.x_encoder_type == "vggt":
+            return self.vggt_out_dim
         if self.x_encoder_type in SEMANTIC_ENCODERS:
             return SEMANTIC_ENCODERS[self.x_encoder_type].embed_dim
         raise ValueError(
             f"Unknown x_encoder_type '{self.x_encoder_type}'. "
-            f"Choose 'fusion_gv' or one of {tuple(SEMANTIC_ENCODERS.keys())}."
+            f"Choose 'fusion_gv', 'vggt', or one of {tuple(SEMANTIC_ENCODERS.keys())}."
         )
 
     @property
     def visual_num_patches(self) -> int:
         """Spatial token count produced by the configured X-encoder."""
-        if self.x_encoder_type == "fusion_gv":
+        if self.x_encoder_type in ("fusion_gv", "vggt"):
             return self.vggt_num_patches
         if self.x_encoder_type in SEMANTIC_ENCODERS:
             return SEMANTIC_ENCODERS[self.x_encoder_type].num_patches
         raise ValueError(
             f"Unknown x_encoder_type '{self.x_encoder_type}'. "
-            f"Choose 'fusion_gv' or one of {tuple(SEMANTIC_ENCODERS.keys())}."
+            f"Choose 'fusion_gv', 'vggt', or one of {tuple(SEMANTIC_ENCODERS.keys())}."
         )
 
     # ── Checkpoints ───────────────────────────────────────────────────────────

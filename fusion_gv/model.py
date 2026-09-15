@@ -29,7 +29,7 @@ from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
 from fusion_gv.encoders import FrozenVGGT, FrozenSemanticEncoder
 from fusion_gv.fusion_aligned import SingleLevelFusion
 
-_X_ENCODER_TYPES = ("fusion_gv",) + tuple(SEMANTIC_ENCODERS.keys())
+_X_ENCODER_TYPES = ("fusion_gv", "vggt") + tuple(SEMANTIC_ENCODERS.keys())
 
 
 def _build_fusion(config: FusionConfig) -> nn.Module:
@@ -95,12 +95,47 @@ class SingleEncoderXEncoder(nn.Module):
         return iter(())
 
 
+class VGGTOnlyXEncoder(nn.Module):
+    """VGGT-only X-encoder (no semantic stream at all) -- ablation opposite
+    of SingleEncoderXEncoder: pure explicit multi-view geometry, no
+    video/image-pretrained semantic encoder in the loop. Answers "does
+    explicit geometric multi-view training alone already cover what ScanNet
+    pretraining would add, without needing vjepa/ijepa at all".
+    """
+
+    def __init__(self, config: FusionConfig | None = None):
+        super().__init__()
+        if config is None:
+            config = FusionConfig(x_encoder_type="vggt")
+        self.config = config
+        self.encoder = FrozenVGGT(config.vggt_ckpt)
+
+    def forward(
+        self,
+        images_vggt: torch.Tensor,
+        images_semantic: torch.Tensor | None = None,
+        batch_size: int | None = None,
+    ) -> torch.Tensor:
+        """Return final-level VGGT features: (B, S, 1369, 2048).
+
+        images_semantic is unused (no semantic stream in this ablation) --
+        accepted only so callers can pass it positionally like every other
+        X-encoder without a type check.
+        """
+        return self.encoder(images_vggt)[-1]
+
+    def trainable_parameters(self):
+        return iter(())
+
+
 def build_x_encoder(config: FusionConfig | None = None) -> nn.Module:
     """Build the configured visual X-encoder."""
     if config is None:
         config = FusionConfig()
     if config.x_encoder_type == "fusion_gv":
         return FusionGV(config)
+    if config.x_encoder_type == "vggt":
+        return VGGTOnlyXEncoder(config)
     if config.x_encoder_type in SEMANTIC_ENCODERS:
         return SingleEncoderXEncoder(config)
     raise ValueError(
