@@ -85,6 +85,27 @@ from fusion_gv.model import build_x_encoder
 _S_MAX = 33
 
 
+def shuffle_frame_blocks(pooled_vis: torch.Tensor, num_frames: int, prob: float) -> torch.Tensor:
+    """Randomly permute the per-frame token blocks of `pooled_vis`, independently per sample.
+
+    pooled_vis: (B, num_frames*K, D), frame-major (frame0's K tokens, frame1's K tokens, ...).
+    Each sample is shuffled with probability `prob`; otherwise it keeps its order.
+    Blocks move whole -- a frame's K tokens stay contiguous and in order.
+    """
+    if prob <= 0.0 or num_frames < 2:
+        return pooled_vis
+    B, SK, D = pooled_vis.shape
+    assert SK % num_frames == 0, f"{SK} tokens don't split into {num_frames} equal frame blocks"
+    K = SK // num_frames
+    dev = pooled_vis.device
+    perm = torch.rand(B, num_frames, device=dev).argsort(dim=1)
+    if prob < 1.0:
+        keep = torch.rand(B, device=dev) >= prob
+        perm = torch.where(keep[:, None], torch.arange(num_frames, device=dev).expand(B, -1), perm)
+    idx = perm[:, :, None, None].expand(B, num_frames, K, D)
+    return pooled_vis.reshape(B, num_frames, K, D).gather(1, idx).reshape(B, SK, D)
+
+
 # ── Toy components for offline / unit-test use ─────────────────────────────────
 
 class _ToyTokenizer:
@@ -236,6 +257,16 @@ class GVJEPAConfig:
     # count (LlamaPredictor raises otherwise).
     query_self_attn_layers: int = 0     # llama path only
 
+    # Frame-order shuffle, applied to the K-token blocks right after visual
+    # pooling and BEFORE frame_embed is added (frame_embed is the predictor's
+    # only frame-order signal -- RoPE is zero-rotation among visual tokens and
+    # the mask is bidirectional). Shuffling here re-randomizes which image
+    # gets which frame index. Per-sample probability; 0.0 (default) = never.
+    # Breaks anything that depends on image index/order (e.g. "image 1" in the
+    # query, appearance-order questions).
+    frame_shuffle_prob: float = 0.0        # train mode (self.training)
+    frame_shuffle_eval_prob: float = 0.0   # eval mode; set to 1.0 to probe order-sensitivity of a trained model
+
     # Query encoder (frozen; conditions the predictor). "toy" for offline
     # tests; otherwise a HuggingFace Llama checkpoint name — also used as the
     # predictor backbone (see predictor_llama_layers above).
@@ -263,6 +294,16 @@ class GVJEPAConfig:
     grounding_ffn_mult: int = 4
     grounding_dropout: float = 0.0
     grounding_patch_grid: int = 37   # 518 / 14 = 37
+
+    def __post_init__(self) -> None:
+        for name in ("frame_shuffle_prob", "frame_shuffle_eval_prob"):
+            p = getattr(self, name)
+            if not 0.0 <= p <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1], got {p}")
+        # grounding_head pairs x_vis with per-frame `spatial` by position; a
+        # shuffle would silently misalign them.
+        if self.grounding_enabled and (self.frame_shuffle_prob > 0 or self.frame_shuffle_eval_prob > 0):
+            raise ValueError("frame shuffle is not supported together with grounding_enabled")
 
 
 # ── Model ──────────────────────────────────────────────────────────────────────
@@ -493,6 +534,10 @@ class FusionGVJEPA(nn.Module):
         B = len(queries)
 
         pooled_vis, spatial = self._pool_visual(images_vggt, images_jepa, B)
+        # Must happen before frame_embed is added below: that's what ties
+        # content to a frame index, so shuffling earlier re-randomizes the pairing.
+        shuffle_prob = self.config.frame_shuffle_prob if self.training else self.config.frame_shuffle_eval_prob
+        pooled_vis = shuffle_frame_blocks(pooled_vis, spatial.shape[1], shuffle_prob)
         vis = self.vis_proj(pooled_vis)   # (B, S, h), S = num_frames * K
         S = vis.shape[1]
         S_frames = spatial.shape[1]

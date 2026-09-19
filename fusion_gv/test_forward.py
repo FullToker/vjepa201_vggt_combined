@@ -20,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -106,6 +107,33 @@ if r1:
     print(f"         output shape : {r1}")
 
 
+# ── Phase 3b: frame-block shuffle (random tensors, no weights) ────────────────
+print("\n=== Phase 3b: shuffle_frame_blocks (random tensors, no weights) ===")
+
+from fusion_gv.gvjepa import shuffle_frame_blocks
+
+def _test_shuffle_frame_blocks():
+    Bs, Sf, K, D = 6, 8, 2, 5
+    x = torch.arange(Bs * Sf * K * D, dtype=torch.float32).reshape(Bs, Sf * K, D)   # all values unique
+    assert shuffle_frame_blocks(x, Sf, 0.0) is x, "prob=0 must be a no-op"
+    y = shuffle_frame_blocks(x, Sf, 1.0)
+    assert y.shape == x.shape
+    xb, yb = x.reshape(Bs, Sf, K, D), y.reshape(Bs, Sf, K, D)
+    for b in range(Bs):
+        # every output block is one whole input block (K tokens intact, in order), each used exactly once
+        src = [(xb[b] == yb[b, i]).all(dim=(1, 2)).nonzero().item() for i in range(Sf)]
+        assert sorted(src) == list(range(Sf)), src
+    assert not torch.equal(y, x), "prob=1 left every sample unchanged"
+    big = torch.arange(200 * Sf * K * D, dtype=torch.float32).reshape(200, Sf * K, D)
+    changed = (shuffle_frame_blocks(big, Sf, 0.5) != big).flatten(1).any(dim=1).sum().item()
+    assert 40 < changed < 160, f"prob=0.5 gate off: {changed}/200 samples changed"
+    return changed
+
+r3b = check("shuffle_frame_blocks: identity at 0, whole-block permutation at 1, per-sample gate", _test_shuffle_frame_blocks)
+if r3b is not None:
+    print(f"         prob=0.5 changed {r3b}/200 samples")
+
+
 # ── Phase 4: full FusionGV (requires ckpts/) ──────────────────────────────────
 print("\n=== Phase 4: full FusionGV forward (requires ckpts/) ===")
 
@@ -186,10 +214,56 @@ for enc_name, spec in SEMANTIC_ENCODERS.items():
         assert out["target"].shape == (1, 64), out["target"].shape
         return out["pred"].shape
 
+    def _test_frame_shuffle_model(enc_name=enc_name, spec=spec):
+        model_cfg = GVJEPAConfig(
+            fusion=FusionConfig(x_encoder_type=enc_name),
+            predictor_hidden_size=128,
+            predictor_layers=1,
+            predictor_heads=4,
+            shared_embed_dim=64,
+            query_model_name="toy",
+            y_encoder_name="toy",
+        )
+        model = FusionGVJEPA(model_cfg).eval()
+        # distinct frames: identical images would make any frame permutation a trivial no-op
+        rng = np.random.default_rng(0)
+        imgs = [Image.fromarray(rng.integers(0, 256, (480, 640, 3), dtype=np.uint8)) for _ in range(S)]
+        vggt_t, _, sem_t = preprocess(
+            imgs, semantic_img_size=spec.img_size, semantic_add_t_dim=spec.add_temporal_dim
+        )
+
+        def pred():
+            with torch.no_grad():
+                return model(vggt_t, sem_t, queries=["describe scene"], targets=["a scene"])["pred"]
+
+        base = pred()
+        # eval mode reads frame_shuffle_eval_prob; frame_shuffle_prob (train) must not leak in
+        model.config.frame_shuffle_prob = 1.0
+        assert torch.allclose(pred(), base, atol=1e-4), "train-mode knob affected eval"
+        model.config.frame_shuffle_prob = 0.0
+        model.config.frame_shuffle_eval_prob = 1.0
+        assert not torch.allclose(pred(), base, atol=1e-4), "eval shuffle before frame_embed changed nothing"
+        # train mode reads frame_shuffle_prob
+        model.config.frame_shuffle_eval_prob = 0.0
+        model.config.frame_shuffle_prob = 1.0
+        model.train()
+        assert not torch.allclose(pred(), base, atol=1e-4), "train shuffle before frame_embed changed nothing"
+        model.eval()
+        # frame_embed is the only frame-order channel: zero it and shuffling must be a no-op
+        model.config.frame_shuffle_prob = 0.0
+        with torch.no_grad():
+            model.frame_embed.weight.zero_()
+        zeroed_base = pred()
+        model.config.frame_shuffle_eval_prob = 1.0
+        assert torch.allclose(pred(), zeroed_base, atol=1e-4), "predictor is order-sensitive beyond frame_embed"
+        return True
+
     r_enc = check(
         f"SingleEncoderXEncoder('{enc_name}') forward → (B,S,{spec.num_patches},{spec.embed_dim})",
         _test_single_encoder_xencoder,
     )
+    check(f"frame shuffle on x_encoder_type='{enc_name}': knobs + frame_embed is the only order channel",
+          _test_frame_shuffle_model)
     r_gvjepa = check(f"FusionGVJEPA x_encoder_type='{enc_name}' forward", _test_gvjepa_with_single_encoder)
     if r_enc:
         print(f"         output shape     : {r_enc}")
