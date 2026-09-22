@@ -40,14 +40,18 @@ DEST="$OUTPUT_DIR/$DEST_FILENAME"
 
 if [[ -f "$DEST" ]]; then
   echo "==> Already downloaded, skipping: $DEST"
-  exit 0
+else
+  echo "==> Downloading $FILE_ID -> $DEST"
+  gdown "$FILE_ID" -O "$DEST"
 fi
-
-echo "==> Downloading $FILE_ID -> $DEST"
-gdown "$FILE_ID" -O "$DEST"
 
 if [[ "$DEST_FILENAME" == *.zip ]]; then
   echo "==> Zip contents (not extracted):"
-  unzip -l "$DEST" | head -50
-  echo "==> To extract: unzip \"$DEST\" -d \"$OUTPUT_DIR\""
+  python3 -c "
+import zipfile
+with zipfile.ZipFile('$DEST') as z:
+    for info in z.infolist()[:50]:
+        print(f'{info.file_size:>12} bytes  {info.filename}')
+"
+  echo "==> To extract: python3 -c \"import zipfile; zipfile.ZipFile('$DEST').extractall('$OUTPUT_DIR')\""
 fi
