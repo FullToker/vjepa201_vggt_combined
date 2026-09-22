@@ -44,7 +44,7 @@ if [[ -f "$DEST" ]]; then
 fi
 
 echo "==> Downloading $FILE_ID -> $DEST"
-gdown --id "$FILE_ID" -O "$DEST"
+gdown "$FILE_ID" -O "$DEST"
 
 if [[ "$DEST_FILENAME" == *.zip ]]; then
   echo "==> Zip contents (not extracted):"
