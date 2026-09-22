@@ -34,6 +34,7 @@ srun singularity exec \
     $CONTAINER \
     bash -c '
         set -euo pipefail
+        export PATH="$HOME/.local/bin:$PATH"
         command -v gdown >/dev/null 2>&1 || pip install --user -q gdown
 
         cd "'"$ROOT"'"
