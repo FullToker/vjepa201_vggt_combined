@@ -13,6 +13,10 @@ Each output row is one training sample:
   {"images": [8 abs paths], "query": "", "target": "<scene caption>",
    "group_id": "scannet/scene0442", "scan_id": "scene0442_00"}
 
+  * rows per scan: max(--train-sets-per-scan, number of captions the scan has), each row a
+    different frame set with its own caption, so every caption is used at least once (3RScan
+    has ~15 per scan, ScanNet 3); with fewer captions than rows they are cycled.
+    Validation uses a fixed --val-sets-per-scan.
   * images: the scan's frame list is cut into --num-frames equal segments and one frame is
     drawn at random from each, so a set spans the whole scan instead of clustering on
     neighbouring near-duplicate frames. Kept in temporal order; the model shuffles them.
@@ -72,7 +76,8 @@ def main() -> None:
     ap.add_argument("--root", type=Path, required=True, help="project root holding source_data/ and data/")
     ap.add_argument("--output-dir", type=Path, default=None, help="default: <root>/data")
     ap.add_argument("--num-frames", type=int, default=8)
-    ap.add_argument("--train-sets-per-scan", type=int, default=8, help="different frame sets sampled per scan (train)")
+    ap.add_argument("--train-sets-per-scan", type=int, default=8,
+                    help="minimum frame sets per scan (train); scans with more captions than this get one row per caption")
     ap.add_argument("--val-sets-per-scan", type=int, default=2)
     ap.add_argument("--val-fraction", type=float, default=0.05, help="fraction of spaces (not scans) held out")
     ap.add_argument("--seed", type=int, default=0)
@@ -125,7 +130,7 @@ def main() -> None:
                 continue
 
             split = "val" if is_val(group, args.val_fraction, args.seed) else "train"
-            n_sets = args.val_sets_per_scan if split == "val" else args.train_sets_per_scan
+            n_sets = args.val_sets_per_scan if split == "val" else max(args.train_sets_per_scan, len(caps[scan_id]))
             rng = random.Random(f"{args.seed}:{scan_id}")   # per-scan, so output is independent of scan order
             captions = list(caps[scan_id])
             rng.shuffle(captions)                            # then cycle, so every caption gets used evenly
