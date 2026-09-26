@@ -134,6 +134,51 @@ if r3b is not None:
     print(f"         prob=0.5 changed {r3b}/200 samples")
 
 
+# ── Phase 3c: group-masked InfoNCE (random tensors, no weights) ────────────────
+print("\n=== Phase 3c: bidirectional_infonce group mask (random tensors, no weights) ===")
+
+import torch.nn.functional as F
+from fusion_gv.gvjepa_trainer import bidirectional_infonce, group_ids_tensor
+
+def _test_group_mask():
+    torch.manual_seed(0)
+    Bs, D, tau = 6, 16, 0.07
+    pred, target = torch.randn(Bs, D), torch.randn(Bs, D)
+    plain = bidirectional_infonce(pred, target, tau)
+
+    distinct = torch.arange(Bs)
+    assert torch.allclose(bidirectional_infonce(pred, target, tau, group_ids=distinct), plain), \
+        "all-distinct groups must equal plain InfoNCE"
+
+    # rows 0,1 and rows 2,3 share a group: reference = the same loss computed by hand with those
+    # off-diagonal entries dropped from the softmax denominators.
+    groups = torch.tensor([0, 0, 1, 1, 2, 3])
+    masked = bidirectional_infonce(pred, target, tau, group_ids=groups)
+    logits = F.normalize(pred, dim=-1) @ F.normalize(target, dim=-1).T / tau
+    keep = (groups[:, None] != groups[None, :]) | torch.eye(Bs, dtype=torch.bool)
+    ref = 0.5 * sum(
+        -torch.log_softmax(m.masked_fill(~kp, float("-inf")), dim=1).diagonal().mean()
+        for m, kp in ((logits, keep), (logits.T, keep.T))
+    )
+    assert torch.allclose(masked, ref, atol=1e-5), (masked.item(), ref.item())
+    assert torch.isfinite(masked) and not torch.allclose(masked, plain), "mask had no effect"
+
+    # a same-group row that is also the *same caption* is the failure this exists for: with
+    # identical targets, plain InfoNCE is forced to push apart two identical vectors.
+    same_t = target.clone(); same_t[1] = same_t[0]; pred2 = pred.clone(); pred2[1] = pred2[0]
+    g = torch.tensor([0, 0, 1, 2, 3, 4])
+    assert bidirectional_infonce(pred2, same_t, tau, group_ids=g) < bidirectional_infonce(pred2, same_t, tau)
+
+    ids = group_ids_tensor(["a", "b", "a", None, None], torch.device("cpu"))
+    assert ids[0] == ids[2] and ids[0] != ids[1] and ids[3] != ids[4] and (ids[3] < 0) and (ids[4] < 0)
+    assert group_ids_tensor([None, None], torch.device("cpu")) is None and group_ids_tensor(None, torch.device("cpu")) is None
+    return plain.item(), masked.item()
+
+r3c = check("group mask == hand-computed reference; distinct groups == plain; None/ungrouped safe", _test_group_mask)
+if r3c:
+    print(f"         plain {r3c[0]:.4f}  masked {r3c[1]:.4f}")
+
+
 # ── Phase 4: full FusionGV (requires ckpts/) ──────────────────────────────────
 print("\n=== Phase 4: full FusionGV forward (requires ckpts/) ===")
 

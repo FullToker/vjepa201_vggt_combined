@@ -147,9 +147,17 @@ def main() -> None:
     _set_seed(tcfg.get("seed", 42) + accelerator.process_index)
 
     model            = build_model_from_config(cfg)
+    if cfg.get("init_vljepa_ckpt") and cfg.get("init_gvjepa_ckpt"):
+        raise ValueError("set only one of init_vljepa_ckpt (open-vljepa weights) and init_gvjepa_ckpt (a checkpoint from this trainer)")
     if cfg.get("init_vljepa_ckpt"):
         from fusion_gv.load_vljepa_init import load_predictor_and_y_encoder_from_vljepa
         load_predictor_and_y_encoder_from_vljepa(model, cfg["init_vljepa_ckpt"])
+    if cfg.get("init_gvjepa_ckpt"):
+        # Weights only (no optimizer/scheduler/step): a fresh stage warm-started from an
+        # earlier stage's checkpoint. strict=True, so fusion/model sections must match.
+        from fusion_gv.infer_gvjepa import _load_checkpoint
+        prev_step = _load_checkpoint(model, Path(cfg["init_gvjepa_ckpt"]))
+        print(f"[init_gvjepa_ckpt] loaded {cfg['init_gvjepa_ckpt']} (step {prev_step})")
     loader           = build_loader_from_config(cfg)
     grounding_loader = build_grounding_loader_from_config(cfg)
     # Not accelerator.prepare()'d -- val runs main-process-only (see

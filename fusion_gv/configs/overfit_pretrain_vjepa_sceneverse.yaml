@@ -1,0 +1,90 @@
+# Single-GPU overfit check for stage 1 (pretrain_vjepa_sceneverse.yaml).
+# Same fusion/model/data as the real run, own output_dir, no val loader, no MLflow.
+#   python fusion_gv/train_gvjepa.py --config fusion_gv/configs/overfit_pretrain_vjepa_sceneverse.yaml \
+#       --overfit --overfit-samples 128 --overfit-steps 200
+# Its final.pt is what overfit_sft_pretrain_vjepa_sceneverse.yaml warm-starts from.
+
+init_vljepa_ckpt: ./ckpts/open_vljepa/best.pt
+
+
+fusion:
+  x_encoder_type: vjepa
+  x_encoder_output_dim: null
+
+  vggt_ckpt: ./ckpts/vggt.pt        # unused under x_encoder_type=vjepa, kept so the section matches the baselines
+  jepa_ckpt: ./ckpts/vjepa2_1_vitl_dist_vitG_384.pt
+
+  vggt_img_size:       518
+  vggt_patch_size:     14
+  vggt_embed_dim:      1024
+  vggt_out_dim:        2048
+  vggt_num_patches:    1369
+  jepa_img_size:       384
+  jepa_patch_size:     16
+  jepa_embed_dim:      1024
+  jepa_num_patches:    576
+  proj_dim: 1024
+
+
+model:
+  predictor_hidden_size: 1024    # toy path only, ignored (llama forces h=2048)
+  predictor_layers:      8
+  predictor_heads:       16
+  predictor_ffn_mult:    4
+  predictor_dropout:     0.1
+
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens:  256
+
+  y_encoder_name:    google/embeddinggemma-300m
+  max_target_tokens: 256
+
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+
+  hf_cache_dir: ./ckpts
+
+  # Same as the real run.
+  frame_shuffle_prob: 1.0
+  frame_shuffle_eval_prob: 1.0
+
+
+data:
+  train_manifests:
+    - ./data/sceneverse_scene_pretrain_train.jsonl
+  num_frames: 8
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+
+train:
+  seed:    42
+  device:  cuda
+  precision: bf16
+
+  output_dir: ./outputs/pretrain_vjepa_sceneverse_overfit
+
+  # Per-GPU batch of the real run, so tensor shapes/memory match (--overfit-samples 128).
+  # --overfit forces max_steps/log_every/save_every and grad_accum=1 at runtime.
+  batch_size: 128
+  gradient_accumulation_steps: 1
+  max_steps: 200
+  log_every: 10
+  save_every: 0
+
+  learning_rate: 2.0e-5
+  min_lr:        1.0e-6
+  clip_grad_norm: 1.0
+  weight_decay:  0.01
+  adam_beta1:    0.9
+  adam_beta2:    0.95
+  adam_eps:      1.0e-8
+  scheduler:   cosine
+  temperature: 0.07
+
+
+mlflow:
+  enabled: false

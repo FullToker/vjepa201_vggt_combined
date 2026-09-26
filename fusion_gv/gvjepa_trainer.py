@@ -145,8 +145,15 @@ def bidirectional_infonce(
     pred: torch.Tensor,
     target: torch.Tensor,
     temperature: float = 0.07,
+    group_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Bidirectional InfoNCE between (B, D) pred and (B, D) target tensors."""
+    """Bidirectional InfoNCE between (B, D) pred and (B, D) target tensors.
+
+    group_ids: optional (B,) integer tensor. Off-diagonal pairs whose rows share
+    a group id (e.g. two samples of the same room) are masked out of both
+    softmaxes: neither a positive nor a negative. The diagonal stays the only
+    positive. None = plain InfoNCE, unchanged.
+    """
     import torch.nn.functional as F
 
     if pred.shape[0] < 2:
@@ -154,8 +161,25 @@ def bidirectional_infonce(
     pred = F.normalize(pred, dim=-1)
     target = F.normalize(target, dim=-1)
     logits = (pred @ target.T) / temperature
+    if group_ids is not None:
+        same = group_ids[:, None] == group_ids[None, :]
+        same = same & ~torch.eye(same.shape[0], dtype=torch.bool, device=same.device)
+        logits = logits.masked_fill(same, float("-inf"))   # symmetric, so it also covers logits.T
     labels = torch.arange(pred.shape[0], device=pred.device)
     return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels))
+
+
+def group_ids_tensor(groups: list | None, device: torch.device) -> torch.Tensor | None:
+    """Per-sample group labels (strings, None = ungrouped) -> (B,) long tensor for
+    bidirectional_infonce, or None when no sample carries a group.
+
+    Ungrouped samples get unique negative ids so they never match anything."""
+    if groups is None or all(g is None for g in groups):
+        return None
+    ids, seen = [], {}
+    for k, g in enumerate(groups):
+        ids.append(-(k + 1) if g is None else seen.setdefault(g, len(seen)))
+    return torch.tensor(ids, dtype=torch.long, device=device)
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
@@ -236,6 +260,7 @@ class GVJEPADataset(Dataset):
             "query": row.get("query", ""),
             "target": row["target"],
             "boxes": row.get("boxes", None),   # list of S × ([x1,y1,x2,y2] | None) or None
+            "group_id": row.get("group_id"),   # optional; same id = same room, see bidirectional_infonce
         }
 
 
@@ -279,6 +304,8 @@ def gvjepa_collate(batch: List[Dict[str, Any]], x_encoder_type: str = "fusion_gv
     """
     from fusion_gv.encoder_registry import SEMANTIC_ENCODERS
 
+    group_ids = [sample.get("group_id") for sample in batch]
+
     if x_encoder_type == "vggt":
         vggt_list = []
         queries, targets, boxes_list = [], [], []
@@ -294,6 +321,7 @@ def gvjepa_collate(batch: List[Dict[str, Any]], x_encoder_type: str = "fusion_gv
             "query": queries,
             "target": targets,
             "boxes": boxes_list,
+            "group_id": group_ids,
         }
 
     spec = None if x_encoder_type == "fusion_gv" else SEMANTIC_ENCODERS[x_encoder_type]
@@ -328,6 +356,7 @@ def gvjepa_collate(batch: List[Dict[str, Any]], x_encoder_type: str = "fusion_gv
         "query": queries,
         "target": targets,
         "boxes": boxes_list,   # list of B × (list of S boxes | None)
+        "group_id": group_ids,   # list of B (str | None)
     }
 
 
@@ -510,7 +539,10 @@ class GVJEPATrainer:
 
         with self.accelerator.autocast():
             out = self.model(images_vggt, images_jepa, batch["query"], batch["target"])
-            loss = bidirectional_infonce(out["pred"], out["target"], temperature=self.temperature)
+            loss = bidirectional_infonce(
+                out["pred"], out["target"], temperature=self.temperature,
+                group_ids=group_ids_tensor(batch.get("group_id"), device),
+            )
             loss = loss / self.grad_accum_steps
 
         return loss, loss.item() * self.grad_accum_steps
@@ -534,11 +566,16 @@ class GVJEPATrainer:
         for i, batch in enumerate(self.val_loader):
             if i >= self.val_max_batches:
                 break
+            if len(batch["query"]) < 2:   # InfoNCE needs >= 2; val loader keeps the ragged tail batch
+                continue
             images_vggt = batch["images_vggt"].to(device, non_blocking=True)
             images_jepa = _maybe_to_device(batch["images_jepa"], device)
             with self.accelerator.autocast():
                 out = raw_model(images_vggt, images_jepa, batch["query"], batch["target"])
-                loss = bidirectional_infonce(out["pred"], out["target"], temperature=self.temperature)
+                loss = bidirectional_infonce(
+                    out["pred"], out["target"], temperature=self.temperature,
+                    group_ids=group_ids_tensor(batch.get("group_id"), device),
+                )
             losses.append(loss.item())
         raw_model.train()
         return sum(losses) / len(losses) if losses else float("nan")
