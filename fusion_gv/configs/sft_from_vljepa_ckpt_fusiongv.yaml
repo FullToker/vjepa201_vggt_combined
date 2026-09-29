@@ -139,7 +139,7 @@ train:
 # ── Inference: VSI-Bench ──────────────────────────────────────────────────────
 # Read by: python fusion_gv/infer_vsibench.py --config <this file> --config-section vsi_inference
 vsi_inference:
-  manifest: ./data/vsibench_manifest.jsonl
+  manifest: ./data/vsibench_manifest_32f.jsonl
   output_dir: ./outputs/inference/sft_from_vljepa_ckpt_fusiongv/vsibench
 
   # null -> resolved from train.output_dir above (latest step_*.pt, or final.pt
@@ -151,7 +151,7 @@ vsi_inference:
   # false or infer_vsibench.py raises.
   save_grounding: false
 
-  batch_size: 8
+  batch_size: 2   # 32 frames/sample vs the old 8-frame manifest's -- untested, lower if it OOMs
   num_workers: 8
   device: cuda
   precision: bf16

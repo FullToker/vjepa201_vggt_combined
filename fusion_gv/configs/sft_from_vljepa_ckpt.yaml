@@ -142,7 +142,7 @@ train:
 # Same fusion/model sections as train: above rebuild the identical architecture
 # needed to load the checkpoint this run produces.
 vsi_inference:
-  manifest: ./data/vsibench_manifest.jsonl
+  manifest: ./data/vsibench_manifest_32f.jsonl
   # Shared per-experiment folder (train.output_dir's basename), vsi/mmsi as
   # subfolders under it instead of siblings under outputs/inference/.
   output_dir: ./outputs/inference/sft_from_vljepa_ckpt/vsibench
@@ -156,7 +156,7 @@ vsi_inference:
   # is vjepa not fusion_gv) -- must be false or infer_vsibench.py raises.
   save_grounding: false
 
-  batch_size: 8
+  batch_size: 2   # 32 frames/sample vs the old 8-frame manifest's -- untested, lower if it OOMs
   num_workers: 8
   device: cuda
   precision: bf16
