@@ -5,8 +5,9 @@
 # Same architecture as sft_vjepa.yaml (x_encoder_type=vjepa, the only mode
 # whose visual_dim=1024 matches open-vljepa's single V-JEPA2 encoder). The
 # only addition is `init_vljepa_ckpt` below: before training starts,
-# train_gvjepa.py loads predictor.layers/norm/vis_proj/pred_proj and
-# y_encoder/y_proj from that checkpoint (see fusion_gv/load_vljepa_init.py
+# train_gvjepa.py loads predictor.layers/norm/pred_proj and
+# y_encoder/y_proj from that checkpoint (vis_proj stays at random init unless
+# init_vljepa_load_vis_proj: true, so all X-encoder arms start it the same way) (see fusion_gv/load_vljepa_init.py
 # for exactly which tensors transfer and which stay at random init —
 # modality_embed, frame_embed, grounding_head have no open-vljepa
 # counterpart).

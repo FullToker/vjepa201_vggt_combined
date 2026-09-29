@@ -17,9 +17,13 @@ google/embeddinggemma-300m as y_encoder. Those weights are shape-identical
 and transfer directly. What does NOT transfer:
   - modality_embed / frame_embed / grounding_head: fusion_gv-only modules,
     open-vljepa has no equivalent — left at random init.
-  - vis_proj: only shape-compatible when fusion.x_encoder_type == "vjepa"
-    (visual_dim=1024, matching open-vljepa's single V-JEPA2 encoder). Under
-    x_encoder_type == "fusion_gv" (2048-d VGGT+JEPA fusion) it's skipped.
+  - vis_proj: NOT loaded by default (load_vis_proj=False), so every
+    x_encoder_type starts it at random init. open-vljepa's vis_proj was trained
+    on V-JEPA2 features, and it only shape-matches some configs (vjepa, or
+    fusion_gv with proj_dim=512); loading it for those arms only gave them a
+    head start over ijepa/vggt in the X-encoder ablation. Pass
+    load_vis_proj=True (config: init_vljepa_load_vis_proj: true) to restore the
+    old shape-gated behavior, e.g. to reproduce pre-fix vjepa baseline runs.
   - predictor.embed_tokens: frozen on both sides, already loaded from the
     same HF checkpoint at construction time — intentionally not copied.
 
@@ -27,7 +31,7 @@ Key mapping (open-vljepa -> fusion_gv)
 ---------------------------------------
     predictor.layers.*     -> predictor.layers.*
     predictor.norm.*       -> predictor.norm.*
-    predictor.vis_proj.*   -> vis_proj.*        (shape-gated, see above)
+    predictor.vis_proj.*   -> vis_proj.*        (only if load_vis_proj, shape-gated)
     predictor.out_proj.*   -> pred_proj.*
     y_encoder.model.*      -> y_encoder.*
     y_encoder.projector.*  -> y_proj.*
@@ -75,7 +79,7 @@ def _load_matching(dst: nn.Module, src_sd: dict, tag: str) -> None:
         print(f"[load_vljepa_init]   left at random init: {tag}.{k}")
 
 
-def load_predictor_and_y_encoder_from_vljepa(model, ckpt_path: str) -> None:
+def load_predictor_and_y_encoder_from_vljepa(model, ckpt_path: str, load_vis_proj: bool = False) -> None:
     """Warm-start `model`'s predictor + y_encoder from an open-vljepa checkpoint.
 
     Args:
@@ -84,6 +88,9 @@ def load_predictor_and_y_encoder_from_vljepa(model, ckpt_path: str) -> None:
         ckpt_path: path to an open-vljepa checkpoint, e.g. `best.pt` from
                    https://huggingface.co/cun-bjy/open-vljepa (dict with a
                    "model_state_dict" key, or a bare state_dict).
+        load_vis_proj: also copy predictor.vis_proj (shape-gated). Default False
+                   keeps vis_proj at random init for every X-encoder, so the
+                   encoder ablation arms start from the same init.
     """
     if not model._use_llama_predictor:
         raise ValueError(
@@ -100,7 +107,10 @@ def load_predictor_and_y_encoder_from_vljepa(model, ckpt_path: str) -> None:
 
     _load_matching(model.predictor.layers, _sub("predictor.layers."), "predictor.layers")
     _load_matching(model.predictor.norm, _sub("predictor.norm."), "predictor.norm")
-    _load_matching(model.vis_proj, _sub("predictor.vis_proj."), "vis_proj")
+    if load_vis_proj:
+        _load_matching(model.vis_proj, _sub("predictor.vis_proj."), "vis_proj")
+    else:
+        print("[load_vljepa_init] vis_proj: not loaded (load_vis_proj=False), left at random init")
     _load_matching(model.pred_proj, _sub("predictor.out_proj."), "pred_proj")
     _load_matching(model.y_encoder, _sub("y_encoder.model."), "y_encoder")
     _load_matching(model.y_proj, _sub("y_encoder.projector."), "y_proj")

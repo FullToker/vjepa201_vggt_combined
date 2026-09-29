@@ -151,7 +151,10 @@ def main() -> None:
         raise ValueError("set only one of init_vljepa_ckpt (open-vljepa weights) and init_gvjepa_ckpt (a checkpoint from this trainer)")
     if cfg.get("init_vljepa_ckpt"):
         from fusion_gv.load_vljepa_init import load_predictor_and_y_encoder_from_vljepa
-        load_predictor_and_y_encoder_from_vljepa(model, cfg["init_vljepa_ckpt"])
+        load_predictor_and_y_encoder_from_vljepa(
+            model, cfg["init_vljepa_ckpt"],
+            load_vis_proj=cfg.get("init_vljepa_load_vis_proj", False),
+        )
     if cfg.get("init_gvjepa_ckpt"):
         # Weights only (no optimizer/scheduler/step): a fresh stage warm-started from an
         # earlier stage's checkpoint. strict=True, so fusion/model sections must match.

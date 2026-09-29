@@ -18,7 +18,8 @@
 # What transfers from the open-vljepa checkpoint vs sft_from_vljepa_ckpt.yaml:
 #   predictor.layers/norm  -> transfers (same Llama-3.2-1B backbone)
 #   y_encoder / y_proj     -> transfers (unaffected by visual_dim)
-#   vis_proj               -> transfers (shape-matched via proj_dim=512, see above)
+#   vis_proj               -> random init by default; transfers (shape-matched via
+#                             proj_dim=512, see above) only with init_vljepa_load_vis_proj: true
 #   geo_proj / sem_proj    -> always from scratch (fusion_gv-only modules,
 #                              open-vljepa has no equivalent)
 #
