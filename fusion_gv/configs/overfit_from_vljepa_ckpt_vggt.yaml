@@ -122,7 +122,7 @@ vsi_inference:
   checkpoint: null   # -> train.output_dir above -> final.pt
   mode: auto
   save_grounding: false
-  batch_size: 2   # 32 frames/sample vs the old 8-frame manifest's -- untested, lower if it OOMs
+  batch_size: 8
   num_workers: 8
   device: cuda
   precision: bf16

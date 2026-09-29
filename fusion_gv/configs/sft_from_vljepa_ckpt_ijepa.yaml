@@ -71,6 +71,13 @@ model:
 
   hf_cache_dir: ./ckpts
 
+  # K=128 (not the default 1/mean-pool): predictor sees frames*K visual
+  # tokens, so this is a real memory jump (8 -> 1024 tokens at num_frames=8),
+  # not free -- batch_size/gradient_accumulation_steps below are lowered
+  # accordingly. No profiling exists yet for this K at this encoder's dim;
+  # the overfit run is what confirms it fits.
+  visual_pool_k: 128
+
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 # Same manifest, same num_frames as the vjepa baseline.
@@ -127,7 +134,7 @@ vsi_inference:
   mode: auto
   save_grounding: false
 
-  batch_size: 2   # 32 frames/sample vs the old 8-frame manifest's -- untested, lower if it OOMs
+  batch_size: 8
   num_workers: 8
   device: cuda
   precision: bf16
