@@ -79,7 +79,7 @@ train:
 
   # Per-GPU batch of the real run, so tensor shapes/memory match (--overfit-samples 128).
   # --overfit forces max_steps/log_every/save_every and grad_accum=1 at runtime.
-  batch_size: 128
+  batch_size: 64
   gradient_accumulation_steps: 1
   max_steps: 200
   log_every: 10

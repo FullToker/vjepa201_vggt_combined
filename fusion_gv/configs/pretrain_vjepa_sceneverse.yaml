@@ -95,14 +95,16 @@ train:
 
   output_dir: ./outputs/pretrain_vjepa_sceneverse
 
-  # 2 GPUs (was 3), global batch 256 (was 384; each rank's InfoNCE sees its own 128).
-  # The train manifest is ~31k rows (max(8, #captions) frame sets per scan: ~8 for
-  # ScanNet, ~15 for 3RScan). max_steps scaled with the effective-batch change
-  # (600 * 384/256 = 900) to keep the same ~7-epoch target -- still a starting
-  # point, not tuned: watch the val loss (every 100 steps) and, if it turns up,
-  # point stage 2 at an earlier step_*.pt instead of final.pt.
-  batch_size:                   128
-  gradient_accumulation_steps:  1
+  # 2 GPUs. batch_size=64/accum=2 (not 128/1) -- same effective batch (64*2*2=256)
+  # and same max_steps target, just halved per-step peak memory: 128/1 OOM'd by
+  # only 96MiB at K=32 (see chat history), so this trim alone should clear it
+  # without touching K further. The train manifest is ~31k rows (max(8, #captions)
+  # frame sets per scan: ~8 for ScanNet, ~15 for 3RScan); max_steps=900 targets
+  # ~7 epochs at effective batch 256 -- still a starting point, not tuned: watch
+  # the val loss (every 100 steps) and, if it turns up, point stage 2 at an
+  # earlier step_*.pt instead of final.pt.
+  batch_size:                   64
+  gradient_accumulation_steps:  2
   max_steps: 900
 
   log_every:  20

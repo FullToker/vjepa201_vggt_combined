@@ -67,7 +67,7 @@ if [ "$RUN_STAGE1" = "1" ]; then
     $SIF accelerate launch --num_processes 1 \
         fusion_gv/train_gvjepa.py \
         --config "$PRETRAIN_CFG" \
-        --overfit --overfit-samples 128 --overfit-steps 200
+        --overfit --overfit-samples 64 --overfit-steps 200
     echo "[overfit-stage1] done $(date)"
 else
     echo "[overfit-stage1] skipped (RUN_STAGE1=0)"
@@ -78,7 +78,7 @@ if [ "$RUN_STAGE2" = "1" ]; then
     $SIF accelerate launch --num_processes 1 \
         fusion_gv/train_gvjepa.py \
         --config "$SFT_CFG" \
-        --overfit --overfit-samples 128 --overfit-steps 200
+        --overfit --overfit-samples 64 --overfit-steps 200
     echo "[overfit-stage2] done $(date)"
 else
     echo "[overfit-stage2] skipped (RUN_STAGE2=0)"

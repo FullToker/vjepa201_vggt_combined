@@ -79,7 +79,7 @@ train:
 
   output_dir: ./outputs/sft_pretrain_vjepa_sceneverse_overfit
 
-  batch_size: 128
+  batch_size: 64
   gradient_accumulation_steps: 1
   max_steps: 200
   log_every: 10

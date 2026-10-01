@@ -88,9 +88,12 @@ train:
 
   output_dir: ./outputs/sft_pretrain_vjepa_sceneverse
 
-  # 2 GPUs (was 3): global batch 128 * 1 * 2 = 256; ceil(1.5 * 1,771,283 / 256) = 10,379.
-  batch_size:                   128
-  gradient_accumulation_steps:  1
+  # 2 GPUs. batch_size=64/accum=2 (not 128/1) -- same effective batch (64*2*2=256)
+  # and same max_steps (10,379), just halved per-step peak memory: 128/1 OOM'd by
+  # only 96MiB at K=32 (see chat history), so this trim alone should clear it
+  # without touching K further.
+  batch_size:                   64
+  gradient_accumulation_steps:  2
   max_steps: 10379
 
   log_every:  50
