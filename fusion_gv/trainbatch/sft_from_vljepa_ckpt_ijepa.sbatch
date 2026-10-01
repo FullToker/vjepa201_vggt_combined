@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=sft_from_vljepa_ckpt_ijepa
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_ijepa/%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_ijepa/%j.err
 
-# 3 GPUs, single job: train, then VSI-Bench infer, then MMSI-Bench infer,
+# 2 GPUs (was 3), single job: train, then VSI-Bench infer, then MMSI-Bench infer,
 # all against fusion_gv/configs/sft_from_vljepa_ckpt_ijepa.yaml. Sibling of
 # sft_from_vljepa_ckpt.sbatch (x_encoder_type=vjepa) -- only the X-encoder
 # differs (ijepa vs vjepa), everything else (data, hparams, GPU count,
@@ -73,7 +73,7 @@ SIF="srun singularity exec \
 
 if [ "$RUN_TRAIN" = "1" ]; then
     echo "[train] start $(date)"
-    $SIF accelerate launch --multi_gpu --num_processes 3 \
+    $SIF accelerate launch --multi_gpu --num_processes 2 \
         fusion_gv/train_gvjepa.py \
         --config fusion_gv/configs/sft_from_vljepa_ckpt_ijepa.yaml
     echo "[train] done $(date)"

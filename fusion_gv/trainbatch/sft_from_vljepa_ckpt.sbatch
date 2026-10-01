@@ -1,17 +1,19 @@
 #!/bin/bash
 #SBATCH --job-name=sft_from_vljepa_ckpt
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt/%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt/%j.err
 
-# 3 GPUs, single job: train, then VSI-Bench infer, then MMSI-Bench infer,
-# all against fusion_gv/configs/sft_from_vljepa_ckpt.yaml (train + vsi_inference
-# + mmsi_inference sections all live in that one file, including max_steps
-# recomputed for the 3x larger global batch -- see that yaml's train: section).
+# 2 GPUs (was 3 -- max_steps in the yaml is recomputed for the new global
+# batch, see that file), single job: train, then VSI-Bench infer, then
+# MMSI-Bench infer, all against fusion_gv/configs/sft_from_vljepa_ckpt.yaml
+# (train + vsi_inference + mmsi_inference sections all live in that one
+# file). visual_pool_k=128 there too -- no memory profile exists yet for
+# K=128 at 2-GPU/batch=128, the overfit job is what confirms it fits.
 # Infer steps read the checkpoint train just wrote via train.output_dir ->
 # final.pt or the latest step_*.pt (see infer_gvjepa._latest_checkpoint), no
 # path to fill in between steps.
@@ -76,7 +78,7 @@ SIF="srun singularity exec \
 
 if [ "$RUN_TRAIN" = "1" ]; then
     echo "[train] start $(date)"
-    $SIF accelerate launch --multi_gpu --num_processes 3 \
+    $SIF accelerate launch --multi_gpu --num_processes 2 \
         fusion_gv/train_gvjepa.py \
         --config fusion_gv/configs/sft_from_vljepa_ckpt.yaml
     echo "[train] done $(date)"

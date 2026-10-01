@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=sft_pretrain_vjepa_sceneverse
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=7-00:00:00
@@ -9,7 +9,7 @@
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/pretrain_vjepa_sceneverse_sft/sft_%j.err
 
 # Stage 2: SPAR SFT warm-started from the stage-1 checkpoint, then VSI-Bench and MMSI-Bench
-# inference. 3 GPUs, V-JEPA only. Config: fusion_gv/configs/sft_pretrain_vjepa_sceneverse.yaml,
+# inference. 2 GPUs (was 3), V-JEPA only. Config: fusion_gv/configs/sft_pretrain_vjepa_sceneverse.yaml,
 # which matches the sft_from_vljepa_ckpt.yaml baseline in everything but the init weights,
 # so the scores compare directly (baseline: VSI 29.03%, MMSI 24.90%).
 #
@@ -69,7 +69,7 @@ SIF="srun singularity exec \
 
 if [ "$RUN_TRAIN" = "1" ]; then
     echo "[sft] start $(date)"
-    $SIF accelerate launch --multi_gpu --num_processes 3 \
+    $SIF accelerate launch --multi_gpu --num_processes 2 \
         fusion_gv/train_gvjepa.py \
         --config "$CONFIG"
     echo "[sft] done $(date)"

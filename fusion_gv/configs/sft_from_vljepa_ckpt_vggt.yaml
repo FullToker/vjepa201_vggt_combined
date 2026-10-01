@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# FusionGVJEPA  ·  SFT stage  ·  x_encoder_type=vggt ablation (single GPU)
+# FusionGVJEPA  ·  SFT stage  ·  x_encoder_type=vggt ablation (2 GPUs)
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # Third arm of the X-encoder ablation, alongside sft_from_vljepa_ckpt.yaml
@@ -9,24 +9,17 @@
 # cover what a video/image-pretrained semantic encoder (or ScanNet
 # pretraining) would add".
 #
-# Single GPU, not 3 like the other two arms' sbatch -- no single-GPU (or
-# multi-GPU) memory profile exists yet for VGGT running alone, so this
-# starts conservative (see overfit_from_vljepa_ckpt_vggt.yaml's batch_size
-# rationale) rather than assuming the vjepa/ijepa arms' 3-GPU numbers carry
-# over to a structurally different, heavier (518px, ~1B-param) encoder.
+# 2 GPUs (was 1): batch_size/gradient_accumulation_steps below are UNCHANGED
+# from the single-GPU version -- only the GPU count moved, so the effective
+# batch doubles (64*6*1=384 -> 64*6*2=768) and max_steps is halved to keep
+# the same ~1.5-epoch data-coverage target (see train: section). batch_size=64
+# itself is still a reasoned-but-unmeasured guess (see
+# overfit_from_vljepa_ckpt_vggt.yaml) -- the overfit run is what confirms it
+# fits, now at 2 GPUs.
 #
-# To keep this arm's total data coverage/optimizer-update count identical to
-# the other two (so all three are actually comparable, not just "ran the
-# same max_steps"), batch_size is traded for gradient_accumulation_steps
-# instead of GPU count: batch_size=64 * accum=6 = effective batch 384,
-# same as sft_from_vljepa_ckpt.yaml's batch_size=128 * 1 * 3 GPUs = 384.
-# max_steps is therefore UNCHANGED (6920, same 1.5-epoch target) -- only
-# wall-clock throughput differs (single GPU doing 6x the forward/backward
-# passes per optimizer step that 3 GPUs did in parallel), not the training
-# dynamics or amount of data seen. batch_size=64 (not 32) is a reasoned-but-
-# unmeasured bump from removing V-JEPA+fusion out of the K-sweep's fused
-# 40.7GB/batch=32 number -- overfit_from_vljepa_ckpt_vggt.yaml's overfit run
-# is what actually confirms it fits before trusting it for a multi-day job.
+# visual_pool_k=128 (not the default 1/mean-pool, see model: section below) is
+# a further, separately-added memory load on top of the above -- also
+# unconfirmed at this combination, same overfit run covers both.
 #
 # Caveat (does NOT need fixing, just know it's there): unlike the vjepa arm,
 # open-vljepa's vis_proj (shaped for visual_dim=1024) does NOT transfer here
@@ -83,11 +76,14 @@ model:
 
   hf_cache_dir: ./ckpts
 
+  # K=128 (not the default 1/mean-pool): predictor sees frames*K visual tokens,
+  # a real memory jump (8 -> 1024 tokens at num_frames=8) on top of this arm's
+  # own 2048-d VGGT tokens. Unmeasured at this combination -- see header.
+  visual_pool_k: 128
+
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
-# Same manifest, same num_frames as the other two arms. num_workers=2 (not
-# 4) -- single process now pulling for the whole effective batch instead of
-# 3 GPU-ranks splitting the load, no need to multiply worker count further.
+# Same manifest, same num_frames as the other two arms.
 data:
   train_manifests:
     - ./data/spar_sftqa_sftvljepa_uni8.jsonl
@@ -106,14 +102,12 @@ train:
 
   output_dir: ./outputs/sft_from_vljepa_ckpt_vggt
 
-  # batch_size(64) * accum(6) * 1 GPU = 384 -- same effective batch as the
-  # vjepa/ijepa arms' batch_size(128) * 1 * 3 GPUs. See header for why.
+  # batch_size(64) * accum(6) * 2 GPUs = 768 (was 384 at 1 GPU). See header.
   batch_size:                   64
   gradient_accumulation_steps:  6
-  # Unchanged from the vjepa/ijepa arms' max_steps -- same effective batch
-  # means same 1.5-epoch data coverage per optimizer step count:
-  #   ceil(1.5 * 1,771,283 / 384) = 6,920
-  max_steps: 6920
+  # Recomputed for the new effective batch (768) to keep the same ~1.5-epoch
+  # data-coverage target: ceil(1.5 * 1,771,283 / 768) = 3,460
+  max_steps: 3460
 
   clip_grad_norm: 1.0
   log_every:  50

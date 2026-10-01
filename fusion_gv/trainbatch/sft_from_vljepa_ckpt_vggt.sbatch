@@ -1,37 +1,29 @@
 #!/bin/bash
 #SBATCH --job-name=sft_from_vljepa_ckpt_vggt
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_vggt/%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_vggt/%j.err
 
-# Single GPU: train, then VSI-Bench infer, then MMSI-Bench infer, all against
-# fusion_gv/configs/sft_from_vljepa_ckpt_vggt.yaml. Third arm of the
-# X-encoder ablation (vjepa / ijepa / vggt) -- see that yaml's header for why
-# this one stays single-GPU (no memory profile for VGGT running alone yet)
-# and how batch_size=64 + gradient_accumulation_steps=6 reproduces the same
-# effective batch (384) and max_steps (6920) as the other two arms' 3-GPU
-# runs, so all three stay comparable on data coverage / optimizer-update count.
+# 2 GPUs (was 1): train, then VSI-Bench infer, then MMSI-Bench infer, all
+# against fusion_gv/configs/sft_from_vljepa_ckpt_vggt.yaml. Third arm of the
+# X-encoder ablation (vjepa / ijepa / vggt). batch_size=64 / accum=6 are
+# unchanged from the single-GPU version -- only the GPU count moved, so
+# effective batch doubled (384 -> 768) and max_steps was halved (6920 ->
+# 3460) to keep the same ~1.5-epoch data coverage; see the yaml. Also now
+# carries visual_pool_k=128 (was the default 1/mean-pool) -- a separate,
+# also-unmeasured memory load on top of the GPU-count change.
 #
-# *** WALL-CLOCK RISK, READ BEFORE SUBMITTING ***
-# The other two arms' 3-GPU runs process their 128-per-GPU micro-batches in
-# parallel; this one processes 6 micro-batches of 64 sequentially on one GPU
-# per optimizer step -- meaningfully slower than the 3-GPU arms (roughly
-# 1.5-2x the compute time per step, not the ~3x a batch_size=32/accum=12
-# split would have cost -- doubling batch_size here is exactly why that
-# comment changed from 32/12 to 64/6, see the yaml). Still not guaranteed to
-# match 3-GPU throughput. --time=7-00:00:00 mirrors the vjepa/ijepa arms'
-# budget, but there's no guarantee 6920 steps finish inside 7 days, and
-# train_gvjepa.py has NO checkpoint-resume flag -- if the job hits the time
-# limit before finishing, save_every=2000 leaves step_*.pt files on disk
-# (see train.output_dir in the yaml) but nothing in this codebase currently
-# loads one back in to continue training from it. Options if 7 days isn't
-# enough: lower max_steps in the yaml (accept less data coverage, breaks the
-# "same as other arms" comparability above), or write a resume path into
-# train_gvjepa.py first (not done here -- out of scope for this ablation).
+# *** READ BEFORE SUBMITTING ***
+# No combination of 2 GPUs / this batch_size/accum / K=128 has been profiled
+# -- the overfit job (single GPU, same per-GPU batch_size and K) is what
+# actually checks it fits, not this comment. train_gvjepa.py also has NO
+# checkpoint-resume flag -- if the job hits --time before max_steps, the
+# step_*.pt files in train.output_dir exist but nothing loads one back in to
+# continue training from it.
 #
 # Same --mem=200G rationale as the vjepa/ijepa arms' real runs (prior
 # host-RAM OOM at MaxRSS=155GB on a multi-day run) -- carried over
@@ -50,8 +42,7 @@
 #   dataset/make_vsibench_manifest.py / make_mmsibench_manifest.py already run # -> data/{vsibench,mmsibench}_manifest.jsonl
 #
 # Run the overfit check first -- it's also what tells you whether
-# batch_size=64 is too conservative (see its yaml's rationale) before
-# committing a week of single-GPU time to this:
+# batch_size=64 + K=128 fits before committing a week of 2-GPU time to this:
 #   sbatch fusion_gv/trainbatch/overfit_sft_from_vljepa_ckpt_vggt.sbatch
 #
 # To re-run only the infer steps after training already finished:
@@ -91,7 +82,7 @@ SIF="srun singularity exec \
 
 if [ "$RUN_TRAIN" = "1" ]; then
     echo "[train] start $(date)"
-    $SIF accelerate launch --num_processes 1 \
+    $SIF accelerate launch --multi_gpu --num_processes 2 \
         fusion_gv/train_gvjepa.py \
         --config fusion_gv/configs/sft_from_vljepa_ckpt_vggt.yaml
     echo "[train] done $(date)"

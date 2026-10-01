@@ -74,6 +74,12 @@ model:
 
   hf_cache_dir: ./ckpts
 
+  # K=128 (not the default 1/mean-pool): predictor sees frames*K visual tokens,
+  # so this is a real memory jump (8 -> 1024 tokens at num_frames=8). No
+  # profiling exists yet for this K at 2-GPU/batch=128; the overfit run is
+  # what confirms it fits.
+  visual_pool_k: 128
+
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 # InfoNCE (spar) only — no grounding: no `grounding:` section and no
@@ -88,11 +94,12 @@ data:
   # Must match --num-frames used by dataset/convert_spar_sftqa_uni8.sbatch —
   # GVJEPADataset drops any row shorter than this and truncates longer ones.
   num_frames: 8
-  # Each of the 3 ranks (accelerate --multi_gpu) spawns its OWN independent
-  # DataLoader workers -- total host worker processes = num_workers * 3, not
+  # Each rank (accelerate --multi_gpu) spawns its OWN independent DataLoader
+  # workers -- total host worker processes = num_workers * num_ranks, not
   # num_workers. A 1-GPU run OOM'd at num_workers=4 (150G, later 200G still
-  # OOM'd once bumped to 3 GPUs without lowering this) -- halved to keep the
-  # 3-rank total (6) below the 1-rank run's total (4) instead of 3x-ing it.
+  # OOM'd once bumped to multi-GPU without lowering this) -- halved to keep
+  # the multi-rank total below the 1-rank run's total instead of Nx-ing it.
+  # (Originally sized for 3 ranks; now 2 -- still halved, not re-tuned.)
   num_workers: 2
   pin_memory: true
   persistent_workers: true
@@ -109,13 +116,11 @@ train:
 
   batch_size:                   128
   gradient_accumulation_steps:  1
-  # 3 GPUs (see trainbatch/sft_from_vljepa_ckpt.sbatch): global batch =
-  # batch_size(128) * 1 * 3 GPUs = 384. Recomputed for 1.5 epochs (same
-  # data-coverage target as before) at this global batch:
-  #   ceil(1.5 * 1,771,283 / 384) = 6,920
-  # (the previous max_steps=20758 was sized for global batch=128/1 GPU --
-  # left unchanged it would have covered 4.5 epochs instead of 1.5)
-  max_steps: 6920
+  # 2 GPUs (see trainbatch/sft_from_vljepa_ckpt.sbatch): global batch =
+  # batch_size(128) * 1 * 2 GPUs = 256 (was 384 at 3 GPUs). Recomputed for
+  # 1.5 epochs (same data-coverage target as before) at this global batch:
+  #   ceil(1.5 * 1,771,283 / 256) = 10,379
+  max_steps: 10379
 
   clip_grad_norm: 1.0
   log_every:  50

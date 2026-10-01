@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=pretrain_vjepa_sceneverse
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/pretrain_vjepa_sceneverse_sft/pretrain_%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/pretrain_vjepa_sceneverse_sft/pretrain_%j.err
 
-# Stage 1: scene-level language pretraining, 3 GPUs, V-JEPA only (no VGGT), with the
+# Stage 1: scene-level language pretraining, 2 GPUs (was 3), V-JEPA only (no VGGT), with the
 # frame-order shuffle on. Config: fusion_gv/configs/pretrain_vjepa_sceneverse.yaml
 # (~600 steps; val loss every 100 steps on held-out spaces, printed in the log/MLflow).
 # Writes ./outputs/pretrain_vjepa_sceneverse/{step_0000300.pt,final.pt}, which stage 2
@@ -59,7 +59,7 @@ SIF="srun singularity exec \
     $CONTAINER"
 
 echo "[pretrain] start $(date)"
-$SIF accelerate launch --multi_gpu --num_processes 3 \
+$SIF accelerate launch --multi_gpu --num_processes 2 \
     fusion_gv/train_gvjepa.py \
     --config fusion_gv/configs/pretrain_vjepa_sceneverse.yaml
 echo "[pretrain] done $(date)"

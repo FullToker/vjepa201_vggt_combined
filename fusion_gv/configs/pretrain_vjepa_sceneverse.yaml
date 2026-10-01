@@ -92,14 +92,15 @@ train:
 
   output_dir: ./outputs/pretrain_vjepa_sceneverse
 
-  # 3 GPUs, global batch 384 (each rank's InfoNCE sees its own 128). The train manifest
-  # is ~31k rows (max(8, #captions) frame sets per scan: ~8 for ScanNet, ~15 for 3RScan),
-  # so ~81 steps per epoch and max_steps 600 is ~7 epochs -- a starting point, not tuned:
-  # watch the val loss (every 100 steps)
-  # and, if it turns up, point stage 2 at an earlier step_*.pt instead of final.pt.
+  # 2 GPUs (was 3), global batch 256 (was 384; each rank's InfoNCE sees its own 128).
+  # The train manifest is ~31k rows (max(8, #captions) frame sets per scan: ~8 for
+  # ScanNet, ~15 for 3RScan). max_steps scaled with the effective-batch change
+  # (600 * 384/256 = 900) to keep the same ~7-epoch target -- still a starting
+  # point, not tuned: watch the val loss (every 100 steps) and, if it turns up,
+  # point stage 2 at an earlier step_*.pt instead of final.pt.
   batch_size:                   128
   gradient_accumulation_steps:  1
-  max_steps: 600
+  max_steps: 900
 
   log_every:  20
   save_every: 300      # a checkpoint (weights + Adam state) is ~10+ GB, keep this sparse

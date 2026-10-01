@@ -107,7 +107,9 @@ train:
 
   batch_size:                   128
   gradient_accumulation_steps:  1
-  max_steps: 6920
+  # 2 GPUs (was 3): global batch = 128*1*2 = 256 (was 384). Recomputed for
+  # 1.5 epochs: ceil(1.5 * 1,771,283 / 256) = 10,379
+  max_steps: 10379
 
   clip_grad_norm: 1.0
   log_every:  50
