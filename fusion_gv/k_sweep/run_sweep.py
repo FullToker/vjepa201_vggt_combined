@@ -19,6 +19,12 @@ the whole point is to find where it breaks.
 Usage (inside the container, single GPU):
     python3 fusion_gv/k_sweep/run_sweep.py
     python3 fusion_gv/k_sweep/run_sweep.py --k-values 1,2,4,8
+
+VGGT-only, 2 GPUs, find the largest K that fits (see run_sweep_vggt_2gpu.sbatch):
+    python3 fusion_gv/k_sweep/run_sweep.py \
+        --config fusion_gv/configs/overfit_from_vljepa_ckpt_vggt.yaml \
+        --out-root outputs/k_sweep_vggt_2gpu --num-gpus 2 \
+        --overfit-samples 64 --k-values 32,64,96,128,192,256 --stop-on-fail
 """
 
 from __future__ import annotations
@@ -44,26 +50,41 @@ def _latest_trace_file(trace_dir: Path) -> Path | None:
     return files[-1] if files else None
 
 
-def run_one(k: int) -> dict:
-    out_dir = OUT_ROOT / f"k{k}"
+def run_one(k: int, config: str, out_root: Path, num_gpus: int, overfit_samples: int) -> dict:
+    out_dir = out_root / f"k{k}"
     trace_dir = out_dir / "profiler_trace"
     shutil.rmtree(trace_dir, ignore_errors=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        "accelerate", "launch", "--num_processes", "1",
+    launch = ["accelerate", "launch"]
+    if num_gpus > 1:
+        launch.append("--multi_gpu")
+    cmd = launch + [
+        "--num_processes", str(num_gpus),
         "fusion_gv/train_gvjepa.py",
-        "--config", BASE_CONFIG,
+        "--config", config,
         "--output-dir", str(out_dir),
         "--visual-pool-k", str(k),
         "--overfit",
-        "--overfit-samples", "32",
+        # _build_overfit_loader freezes this many samples as ONE batch per
+        # process, so this is the per-GPU batch size, not the yaml's.
+        "--overfit-samples", str(overfit_samples),
         "--overfit-steps", str(PROFILE_STEPS + 20),
         "--profile",
         "--profile-steps", str(PROFILE_STEPS),
     ]
-    result = subprocess.run(cmd)
+    # stderr goes to a file so an OOM can be told apart from any other crash.
+    stderr_log = out_dir / "stderr.log"
+    with open(stderr_log, "w") as err:
+        result = subprocess.run(cmd, stderr=err)
+    # The trainer always writes final.pt (full model + optimizer state); a
+    # sweep only needs the memory/timing numbers, so don't keep one per K.
+    (out_dir / "final.pt").unlink(missing_ok=True)
     if result.returncode != 0:
-        return {"k": k, "status": "failed", "returncode": result.returncode}
+        err_text = stderr_log.read_text(errors="replace")
+        sys.stderr.write(err_text[-3000:])
+        status = "oom" if "out of memory" in err_text.lower() else "failed"
+        return {"k": k, "status": status, "returncode": result.returncode}
 
     trace_file = _latest_trace_file(trace_dir)
     if trace_file is None:
@@ -105,18 +126,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="K-sweep for VisualResampler")
     parser.add_argument("--k-values", type=str, default=None,
                          help="Comma-separated K values, e.g. '1,2,4,8' (default: 1,2,4,8,16,32,64,128,256,512,768,1024,1369)")
+    parser.add_argument("--config", type=str, default=BASE_CONFIG,
+                         help=f"Base YAML config (default: {BASE_CONFIG})")
+    parser.add_argument("--out-root", type=Path, default=OUT_ROOT,
+                         help=f"Per-K output dirs + k_sweep_results.json go here (default: {OUT_ROOT})")
+    parser.add_argument("--num-gpus", type=int, default=1,
+                         help="accelerate processes; peak memory is reported for the main process's GPU (default: 1)")
+    parser.add_argument("--overfit-samples", type=int, default=32,
+                         help="Per-GPU batch size of the frozen overfit batch (default: 32)")
+    parser.add_argument("--stop-on-fail", action="store_true",
+                         help="Stop at the first failed K instead of continuing through the rest")
     args = parser.parse_args()
     k_values = [int(x) for x in args.k_values.split(",")] if args.k_values else K_VALUES
 
-    OUT_ROOT.mkdir(parents=True, exist_ok=True)
+    args.out_root.mkdir(parents=True, exist_ok=True)
     results = []
     for k in k_values:
         print(f"\n=== K={k} ===", flush=True)
-        r = run_one(k)
+        r = run_one(k, args.config, args.out_root, args.num_gpus, args.overfit_samples)
         print(json.dumps(r, indent=2), flush=True)
         results.append(r)
-        with open(OUT_ROOT / "k_sweep_results.json", "w") as f:
+        with open(args.out_root / "k_sweep_results.json", "w") as f:
             json.dump(results, f, indent=2)
+        if args.stop_on_fail and r["status"] != "ok":
+            break
 
     _print_table(results)
 
