@@ -172,8 +172,10 @@ def main() -> None:
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
     if grounding_loader is not None:
         grounding_loader = accelerator.prepare(grounding_loader)
-    if scheduler is not None:
-        scheduler = accelerator.prepare(scheduler)
+    # The scheduler is deliberately NOT accelerator.prepare()'d: a prepared
+    # scheduler advances num_processes times per call, which would make the
+    # schedule length depend on the GPU count. Left raw, it advances exactly
+    # once per optimizer update on every rank (see GVJEPATrainer.fit).
 
     if args.overfit:
         if accelerator.is_main_process:

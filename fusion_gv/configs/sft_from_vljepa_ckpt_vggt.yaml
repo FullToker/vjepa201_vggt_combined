@@ -9,13 +9,13 @@
 # cover what a video/image-pretrained semantic encoder (or ScanNet
 # pretraining) would add".
 #
-# 2 GPUs (was 1): batch_size/gradient_accumulation_steps below are UNCHANGED
-# from the single-GPU version -- only the GPU count moved, so the effective
-# batch doubles (64*6*1=384 -> 64*6*2=768) and max_steps is halved to keep
-# the same ~1.5-epoch data-coverage target (see train: section). batch_size=64
+# 2 GPUs. InfoNCE negatives are gathered across ranks (gvjepa_trainer.py
+# gather_with_grad), so each sample is scored against 64*2-1 = 127 negatives;
+# on a single GPU the gather is a no-op and it is 63. Gradient accumulation
+# does NOT add negatives, so it is off here (see train: section). batch_size=64
 # itself is still a reasoned-but-unmeasured guess (see
 # overfit_from_vljepa_ckpt_vggt.yaml) -- the overfit run is what confirms it
-# fits, now at 2 GPUs.
+# fits.
 #
 # visual_pool_k=128 (not the default 1/mean-pool, see model: section below) is
 # a further, separately-added memory load on top of the above -- also
@@ -81,6 +81,10 @@ model:
   # own 2048-d VGGT tokens. Unmeasured at this combination -- see header.
   visual_pool_k: 128
 
+  # Train on 8 frames, evaluate VSI-Bench on 32: draw the 8 frame tags from all
+  # 33 frame_embed rows so rows 8..32 are trained too (see GVJEPAConfig).
+  frame_id_random: true
+
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 # Same manifest, same num_frames as the other two arms.
@@ -102,19 +106,29 @@ train:
 
   output_dir: ./outputs/sft_from_vljepa_ckpt_vggt
 
-  # batch_size(64) * accum(6) * 2 GPUs = 768 (was 384 at 1 GPU). See header.
+  # max_steps counts BATCHES per rank (GVJEPATrainer.fit), not optimizer
+  # updates: updates = max_steps / gradient_accumulation_steps, and samples
+  # seen = max_steps * batch_size * num_gpus. The previous setting
+  # (accum 6, max_steps 3460) was therefore 577 updates over ~0.25 epoch,
+  # not the 3460 updates / 1.5 epochs its comment intended.
+  #
+  # Now: accum 1 -> 10,380 updates, 10,380 * 64 * 2 = 1.33M samples
+  # = 0.75 epoch of 1,771,283 rows (~3x the previous wall-clock).
+  # Full 1.5 epochs = 20,757. On 1 GPU, double max_steps for the same coverage.
   batch_size:                   64
-  gradient_accumulation_steps:  6
-  # Recomputed for the new effective batch (768) to keep the same ~1.5-epoch
-  # data-coverage target: ceil(1.5 * 1,771,283 / 768) = 3,460
-  max_steps: 3460
+  gradient_accumulation_steps:  1
+  max_steps: 10380
 
   clip_grad_norm: 1.0
   log_every:  50
   save_every: 2000
 
-  learning_rate: 1.0e-5
+  # High LR for everything trainable except y_encoder (resampler, vis_proj,
+  # embeddings, predictor, pred_proj, y_proj). y_encoder runs at
+  # learning_rate * model.y_encoder_lr_multiplier (0.05) = 5e-6.
+  learning_rate: 1.0e-4
   min_lr:        1.0e-6
+  warmup_steps:  500             # optimizer updates, linear 0 -> learning_rate
   weight_decay:  0.01
   adam_beta1:    0.9
   adam_beta2:    0.95

@@ -37,10 +37,12 @@ import functools
 import gc
 import json
 import platform
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
@@ -169,17 +171,67 @@ def bidirectional_infonce(
     return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels))
 
 
-def group_ids_tensor(groups: list | None, device: torch.device) -> torch.Tensor | None:
+def group_ids_tensor(
+    groups: list | None,
+    device: torch.device,
+    batch_size: int | None = None,
+    rank: int = 0,
+    force: bool = False,
+) -> torch.Tensor | None:
     """Per-sample group labels (strings, None = ungrouped) -> (B,) long tensor for
     bidirectional_infonce, or None when no sample carries a group.
 
-    Ungrouped samples get unique negative ids so they never match anything."""
+    Grouped samples get crc32(label) (>= 0): stable across processes, so ids built
+    on different ranks still match after gather_with_grad. Ungrouped samples get
+    unique negative ids so they never match anything -- `rank` offsets them so
+    they stay unique across ranks too.
+
+    force=True always returns a tensor (all-unique ids when nothing is grouped);
+    the multi-GPU path needs every rank to contribute the same shape to all_gather.
+    Requires batch_size when groups is None."""
     if groups is None or all(g is None for g in groups):
-        return None
-    ids, seen = [], {}
-    for k, g in enumerate(groups):
-        ids.append(-(k + 1) if g is None else seen.setdefault(g, len(seen)))
+        if not force:
+            return None
+        groups = [None] * (batch_size if groups is None else len(groups))
+    B = len(groups)
+    ids = [
+        -(rank * B + k + 1) if g is None else zlib.crc32(str(g).encode("utf-8"))
+        for k, g in enumerate(groups)
+    ]
     return torch.tensor(ids, dtype=torch.long, device=device)
+
+
+# ── Cross-GPU negatives ────────────────────────────────────────────────────────
+
+def _world_size() -> int:
+    """Number of DDP ranks; 1 on single-GPU / CPU / non-distributed runs."""
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_world_size()
+    return 1
+
+
+def gather_with_grad(x: torch.Tensor) -> torch.Tensor:
+    """Concatenate `x` from every DDP rank, rank order, keeping the autograd graph
+    only for this rank's own slice (the other ranks' slices arrive detached).
+
+    No-op on a single process. Every rank must pass the same shape (the train
+    loader's drop_last=True + DistributedSampler guarantee that)."""
+    if _world_size() == 1:
+        return x
+    parts = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
+    dist.all_gather(parts, x.detach())
+    parts[dist.get_rank()] = x
+    return torch.cat(parts, dim=0)
+
+
+def dist_gather_ids(ids: torch.Tensor) -> torch.Tensor:
+    """Concatenate a (B,) id tensor from every DDP rank, same rank order as
+    gather_with_grad. No-op on a single process."""
+    if _world_size() == 1:
+        return ids
+    parts = [torch.zeros_like(ids) for _ in range(dist.get_world_size())]
+    dist.all_gather(parts, ids)
+    return torch.cat(parts, dim=0)
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
@@ -539,13 +591,32 @@ class GVJEPATrainer:
 
         with self.accelerator.autocast():
             out = self.model(images_vggt, images_jepa, batch["query"], batch["target"])
-            loss = bidirectional_infonce(
-                out["pred"], out["target"], temperature=self.temperature,
-                group_ids=group_ids_tensor(batch.get("group_id"), device),
+            pred, target = out["pred"], out["target"]
+            world = _world_size()
+            if world == 1:
+                group_ids = group_ids_tensor(batch.get("group_id"), device)
+            else:
+                # Multi-GPU only: every rank scores its samples against the
+                # negatives of ALL ranks (world * B - 1 instead of B - 1).
+                # Other ranks' embeddings come in detached, so each rank only
+                # backprops through its own rows/columns of the global loss;
+                # DDP then averages those per-rank pieces, i.e. sums to
+                # grad(global loss) / world -- hence the `* world` below.
+                B = pred.shape[0]
+                group_ids = dist_gather_ids(
+                    group_ids_tensor(
+                        batch.get("group_id"), device,
+                        batch_size=B, rank=dist.get_rank(), force=True,
+                    )
+                )
+                # .float(): all_gather on a plain fp32 buffer regardless of autocast dtype
+                pred, target = gather_with_grad(pred.float()), gather_with_grad(target.float())
+            infonce = bidirectional_infonce(
+                pred, target, temperature=self.temperature, group_ids=group_ids,
             )
-            loss = loss / self.grad_accum_steps
+            loss = infonce * world / self.grad_accum_steps
 
-        return loss, loss.item() * self.grad_accum_steps
+        return loss, infonce.item()
 
     @torch.no_grad()
     def _run_val(self) -> float:
@@ -637,7 +708,11 @@ class GVJEPATrainer:
                 grounding_ema_val = 0.0
 
             self.accelerator.backward(loss)
-            running_loss           += loss.item() * self.grad_accum_steps
+            # InfoNCE steps log the unscaled loss: `loss` itself carries the
+            # multi-GPU `* world` gradient correction from _spar_step.
+            running_loss           += (
+                loss.item() * self.grad_accum_steps if use_grounding else infonce_val
+            )
             running_infonce        += infonce_val
             running_grounding      += grounding_val
             running_grounding_ema  += grounding_ema_val
@@ -822,6 +897,7 @@ def build_model_from_config(cfg: dict) -> "FusionGVJEPA":
         query_self_attn_layers=m.get("query_self_attn_layers", 0),
         frame_shuffle_prob=m.get("frame_shuffle_prob", 0.0),
         frame_shuffle_eval_prob=m.get("frame_shuffle_eval_prob", 0.0),
+        frame_id_random=m.get("frame_id_random", False),
         query_model_name=m.get("query_model_name", "toy"),
         max_query_tokens=m.get("max_query_tokens", 64),
         y_encoder_name=m.get("y_encoder_name", "toy"),
@@ -945,11 +1021,29 @@ def build_optimizer_and_scheduler_from_config(
     )
     sched_name = tcfg.get("scheduler", "constant")
     if sched_name == "cosine":
+        # GVJEPATrainer.fit counts max_steps in batches but steps the scheduler
+        # once per optimizer update (every gradient_accumulation_steps batches),
+        # so the schedule length is the number of updates, not max_steps.
+        num_updates = max(1, tcfg["max_steps"] // tcfg.get("gradient_accumulation_steps", 1))
+        warmup = int(tcfg.get("warmup_steps", 0))   # in optimizer updates; 0 = off
+        if warmup >= num_updates:
+            raise ValueError(f"warmup_steps ({warmup}) must be < optimizer updates ({num_updates})")
         scheduler = build_cosine_scheduler(
             optimizer,
-            max_steps=tcfg["max_steps"],
+            max_steps=num_updates - warmup,
             min_lr=tcfg.get("min_lr", 0.0),
         )
+        if warmup > 0:
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                [
+                    torch.optim.lr_scheduler.LinearLR(
+                        optimizer, start_factor=1.0 / warmup, total_iters=warmup
+                    ),
+                    scheduler,
+                ],
+                milestones=[warmup],
+            )
     elif sched_name == "constant":
         scheduler = None
     else:

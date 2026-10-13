@@ -267,6 +267,13 @@ class GVJEPAConfig:
     frame_shuffle_prob: float = 0.0        # train mode (self.training)
     frame_shuffle_eval_prob: float = 0.0   # eval mode; set to 1.0 to probe order-sensitivity of a trained model
 
+    # Train mode only: tag the S frames with S random frame_embed rows drawn
+    # from [0, _S_MAX), sorted (relative order kept), instead of always rows
+    # 0..S-1. Without it, training at num_frames=8 never updates rows 8..32,
+    # so evaluating on more frames than trained (VSI-Bench 32f) feeds
+    # random-init tags. Eval always uses rows 0..S-1. False = old behavior.
+    frame_id_random: bool = False
+
     # Query encoder (frozen; conditions the predictor). "toy" for offline
     # tests; otherwise a HuggingFace Llama checkpoint name — also used as the
     # predictor backbone (see predictor_llama_layers above).
@@ -545,7 +552,11 @@ class FusionGVJEPA(nn.Module):
 
         # Same frame_ids row repeated across each frame's K tokens (frame-major
         # layout from _pool_visual) — a pure "same-group" marker, not a K-index.
-        frame_ids = torch.arange(S_frames, device=device).repeat_interleave(S // S_frames)
+        if self.training and self.config.frame_id_random:
+            frame_ids = torch.randperm(_S_MAX, device=device)[:S_frames].sort().values
+        else:
+            frame_ids = torch.arange(S_frames, device=device)
+        frame_ids = frame_ids.repeat_interleave(S // S_frames)
         vis = vis + self.modality_embed.weight[0] + self.frame_embed(frame_ids)  # (B,S,h)
 
         q_tok = self._tokenize(
