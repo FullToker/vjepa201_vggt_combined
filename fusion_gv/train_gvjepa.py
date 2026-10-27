@@ -45,17 +45,24 @@ def _build_overfit_loader(loader, n_samples: int):
     collected, total = [], 0
     for batch in loader:
         collected.append(batch)
-        total += batch["images_vggt"].shape[0]
+        total += len(batch["query"])
         if total >= n_samples:
             break
 
-    S = collected[0]["images_vggt"].shape[1]
+    # images_jepa is None under x_encoder_type="vggt" (collate skips the
+    # semantic stream entirely) -- keep it None instead of torch.cat-ing it.
+    jepa = None
+    if collected[0]["images_jepa"] is not None:
+        S = collected[0]["images_vggt"].shape[1]
+        jepa = torch.cat([b["images_jepa"] for b in collected])[:n_samples * S]
+
     fixed = {
         "images_vggt": torch.cat([b["images_vggt"] for b in collected])[:n_samples],
-        "images_jepa": torch.cat([b["images_jepa"] for b in collected])[:n_samples * S],
+        "images_jepa": jepa,
         "query":  sum([b["query"]  for b in collected], [])[:n_samples],
         "target": sum([b["target"] for b in collected], [])[:n_samples],
         "boxes":  sum([b["boxes"]  for b in collected], [])[:n_samples],
+        "group_id": sum([list(b.get("group_id") or [None] * len(b["query"])) for b in collected], [])[:n_samples],
     }
 
     class _RepeatLoader:
