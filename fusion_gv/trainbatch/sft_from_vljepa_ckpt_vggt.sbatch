@@ -1,15 +1,19 @@
 #!/bin/bash
 #SBATCH --job-name=sft_from_vljepa_ckpt_vggt
 #SBATCH --partition=geo
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:3
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=200G
+#SBATCH --mem=300G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_vggt/%j.out
 #SBATCH --error=/glob/g01-cache/pf/Yushuo/vjepa201/logs/sft_from_vljepa_ckpt_vggt/%j.err
 
-# 2 GPUs (was 1): train, then VSI-Bench infer, then MMSI-Bench infer, all
-# against fusion_gv/configs/sft_from_vljepa_ckpt_vggt.yaml. Third arm of the
+# 3 GPUs, K=32: train, then VSI-Bench (32f) infer, then MMSI-Bench infer, all
+# against fusion_gv/configs/sft_from_vljepa_ckpt_vggt.yaml (outputs under
+# outputs/sft_from_vljepa_ckpt_vggt_k32/). --mem 300G: 200G was sized for
+# 2 GPUs (prior MaxRSS 155GB), one more rank adds its own model copy +
+# dataloader workers. The paragraph below describes the older 2-GPU/K=128
+# setup and is kept for history; the yaml header is current. Third arm of the
 # X-encoder ablation (vjepa / ijepa / vggt). batch_size=64 / accum=6 are
 # unchanged from the single-GPU version -- only the GPU count moved, so
 # effective batch doubled (384 -> 768) and max_steps was halved (6920 ->
@@ -82,7 +86,7 @@ SIF="srun singularity exec \
 
 if [ "$RUN_TRAIN" = "1" ]; then
     echo "[train] start $(date)"
-    $SIF accelerate launch --multi_gpu --num_processes 2 \
+    $SIF accelerate launch --multi_gpu --num_processes 3 \
         fusion_gv/train_gvjepa.py \
         --config fusion_gv/configs/sft_from_vljepa_ckpt_vggt.yaml
     echo "[train] done $(date)"

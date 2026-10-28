@@ -329,7 +329,9 @@ def main() -> None:
         device_str = "cpu"
     device = torch.device(device_str)
 
-    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint)
+    # icfg (the --config-section) is where the yamls put checkpoint:
+    # _resolve_checkpoint itself only looks at cfg["inference"].
+    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint or icfg.get("checkpoint"))
     model = build_model_from_config(cfg)
     if model.grounding_head is None and save_grounding:
         raise RuntimeError(
