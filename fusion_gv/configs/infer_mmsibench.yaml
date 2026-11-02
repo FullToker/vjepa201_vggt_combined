@@ -57,7 +57,7 @@ inference:
   manifest: ./data/mmsibench_manifest.jsonl
   output_dir: ./outputs/inference/mmsibench
 
-  checkpoint: ./outputs/sft_grounding_mixed/step_0065000.pt   # null -> use train.output_dir latest step_*.pt
+  checkpoint: ./outputs/sft_grounding_mixed/final.pt   # null -> use train.output_dir latest step_*.pt
 
   mode: auto              # auto, select, multichoices
   save_grounding: true    # write heatmap.npy + per-frame overlay_{k}.jpg
